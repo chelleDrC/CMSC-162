@@ -44,6 +44,15 @@ class PixelViewApp:
 
         self._dropdown = None  # currently open File dropdown, if any
 
+        # Canvas view state (pan/zoom)
+        self._img_w, self._img_h = 300, 168
+        self._zoom = 1.0
+        self._offset_x, self._offset_y = 0.0, 0.0
+        self._space_down = False
+        self._panning = False
+        self._pan_start = (0, 0)
+        self._pan_start_offset = (0.0, 0.0)
+
         self._build_title_bar()
         self._build_menu_bar()
 
@@ -58,6 +67,10 @@ class PixelViewApp:
 
         # Close any open dropdown when clicking elsewhere in the app
         root.bind("<Button-1>", self._maybe_close_dropdown, add="+")
+
+        # Hold Space to pan the canvas (app-wide so focus doesn't matter)
+        root.bind_all("<KeyPress-space>", self._on_space_down)
+        root.bind_all("<KeyRelease-space>", self._on_space_up)
 
     # ------------------------------------------------------------------
     # Top title strip: "PixelView UI Design"
@@ -204,12 +217,7 @@ class PixelViewApp:
                  font=FONT_LABEL_HEADER).pack(side=tk.LEFT)
 
         layers = [
-            ("Layer 8", "#5b8def", False, True),
-            ("Curves", "#7a7a7a", False, False),
-            ("Fog Overlay", "#8a8a8a", False, False),
-            ("Particles", "#7a7a7a", False, False),
-            ("Ridge Detail", "#6f6f6f", True, False),
-            ("Background", "#3a3a3a", True, False),
+            ("Layer 1", "#5b8def", False, True),
         ]
 
         list_frame = tk.Frame(panel, bg=BG_PANEL)
@@ -254,19 +262,101 @@ class PixelViewApp:
         self.canvas = tk.Canvas(wrap, bg=BG_CANVAS_AREA, highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        def draw_placeholder(event=None):
-            self.canvas.delete("placeholder")
-            w = self.canvas.winfo_width()
-            h = self.canvas.winfo_height()
-            pw, ph = 300, 168
-            x0 = (w - pw) // 2
-            y0 = (h - ph) // 2
-            self.canvas.create_rectangle(
-                x0, y0, x0 + pw, y0 + ph,
-                fill="#ffffff", outline="", tags="placeholder"
-            )
+        self.canvas.bind("<Configure>", self._redraw_canvas_content)
 
-        self.canvas.bind("<Configure>", draw_placeholder)
+        # Pan: hold Space, then click + drag
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+
+        # Zoom: mouse wheel (Windows/Mac use <MouseWheel>, Linux uses Button-4/5)
+        self.canvas.bind("<MouseWheel>", self._on_canvas_zoom)
+        self.canvas.bind("<Button-4>", self._on_canvas_zoom_linux)
+        self.canvas.bind("<Button-5>", self._on_canvas_zoom_linux)
+
+    def _redraw_canvas_content(self, event=None):
+        self.canvas.delete("placeholder")
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        if w <= 1 or h <= 1:
+            return
+        cx = w / 2 + self._offset_x
+        cy = h / 2 + self._offset_y
+        pw = self._img_w * self._zoom
+        ph = self._img_h * self._zoom
+        x0, y0 = cx - pw / 2, cy - ph / 2
+        self.canvas.create_rectangle(
+            x0, y0, x0 + pw, y0 + ph,
+            fill="#ffffff", outline="", tags="placeholder"
+        )
+
+    # -- Pan (Space + drag) -------------------------------------------
+    def _on_space_down(self, event=None):
+        self._space_down = True
+        if not self._panning:
+            self.canvas.configure(cursor="fleur")
+
+    def _on_space_up(self, event=None):
+        self._space_down = False
+        if not self._panning:
+            self.canvas.configure(cursor="")
+
+    def _on_canvas_press(self, event):
+        if not self._space_down:
+            return
+        self._panning = True
+        self._pan_start = (event.x, event.y)
+        self._pan_start_offset = (self._offset_x, self._offset_y)
+        self.canvas.configure(cursor="fleur")
+
+    def _on_canvas_drag(self, event):
+        if not self._panning:
+            return
+        dx = event.x - self._pan_start[0]
+        dy = event.y - self._pan_start[1]
+        self._offset_x = self._pan_start_offset[0] + dx
+        self._offset_y = self._pan_start_offset[1] + dy
+        self._redraw_canvas_content()
+
+    def _on_canvas_release(self, event=None):
+        if not self._panning:
+            return
+        self._panning = False
+        self.canvas.configure(cursor="fleur" if self._space_down else "")
+
+    # -- Zoom (mouse wheel, centered on cursor) ------------------------
+    def _on_canvas_zoom(self, event):
+        factor = 1.1 if event.delta > 0 else (1 / 1.1)
+        self._zoom_at(event.x, event.y, factor)
+
+    def _on_canvas_zoom_linux(self, event):
+        factor = 1.1 if event.num == 4 else (1 / 1.1)
+        self._zoom_at(event.x, event.y, factor)
+
+    def _zoom_at(self, mx, my, factor):
+        new_zoom = max(0.2, min(5.0, self._zoom * factor))
+        if new_zoom == self._zoom:
+            return
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        cx, cy = w / 2, h / 2
+        rel_x = mx - cx - self._offset_x
+        rel_y = my - cy - self._offset_y
+        ratio = new_zoom / self._zoom
+        self._offset_x = mx - cx - rel_x * ratio
+        self._offset_y = my - cy - rel_y * ratio
+        self._zoom = new_zoom
+        self._redraw_canvas_content()
+        self._update_zoom_display()
+
+    def _update_zoom_display(self):
+        pct_text = f"{round(self._zoom * 100)}%"
+        if hasattr(self, "zoom_pct_label"):
+            self.zoom_pct_label.configure(text=pct_text)
+        if hasattr(self, "zoom_level_value"):
+            self.zoom_level_value.configure(text=pct_text)
+        if hasattr(self, "zoom_scale_value"):
+            self.zoom_scale_value.configure(text=f"{self._zoom:.2f}x")
 
     # ------------------------------------------------------------------
     # Right panel: INFO (cursor pos / pixel color / image props / zoom)
@@ -324,8 +414,21 @@ class PixelViewApp:
         kv_row("File Size")
 
         section("\u25be ZOOM")
-        kv_row("Level")
-        kv_row("Scale")
+        level_row = tk.Frame(panel, bg=BG_PANEL)
+        level_row.pack(fill=tk.X, padx=12, pady=1)
+        tk.Label(level_row, text="Level", bg=BG_PANEL, fg=TEXT_DISABLED,
+                 font=FONT_LABEL).pack(side=tk.LEFT)
+        self.zoom_level_value = tk.Label(level_row, text="100%", bg=BG_PANEL,
+                                          fg=TEXT_DISABLED, font=FONT_LABEL)
+        self.zoom_level_value.pack(side=tk.RIGHT)
+
+        scale_row = tk.Frame(panel, bg=BG_PANEL)
+        scale_row.pack(fill=tk.X, padx=12, pady=1)
+        tk.Label(scale_row, text="Scale", bg=BG_PANEL, fg=TEXT_DISABLED,
+                 font=FONT_LABEL).pack(side=tk.LEFT)
+        self.zoom_scale_value = tk.Label(scale_row, text="1.00x", bg=BG_PANEL,
+                                          fg=TEXT_DISABLED, font=FONT_LABEL)
+        self.zoom_scale_value.pack(side=tk.RIGHT)
 
     # ------------------------------------------------------------------
     # Bottom toolbar: tool icons (disabled placeholders, select "active")
@@ -355,8 +458,9 @@ class PixelViewApp:
 
         tk.Label(center, text="\u2212", bg=BG_MENUBAR, fg=TEXT_DISABLED,
                  font=FONT_UI).pack(side=tk.LEFT, padx=10)
-        tk.Label(center, text="100%", bg=BG_MENUBAR, fg=TEXT_DISABLED,
-                 font=FONT_LABEL).pack(side=tk.LEFT, padx=4)
+        self.zoom_pct_label = tk.Label(center, text="100%", bg=BG_MENUBAR,
+                                        fg=TEXT_DISABLED, font=FONT_LABEL)
+        self.zoom_pct_label.pack(side=tk.LEFT, padx=4)
         tk.Label(center, text="+", bg=BG_MENUBAR, fg=TEXT_DISABLED,
                  font=FONT_UI).pack(side=tk.LEFT, padx=10)
         tk.Label(center, text="\u26f6", bg=BG_MENUBAR, fg=TEXT_DISABLED,
