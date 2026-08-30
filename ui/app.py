@@ -9,6 +9,16 @@ will be wired up in later project phases.
 """
 
 import tkinter as tk
+from tkinter import messagebox
+from PIL import ImageTk
+from backend.image import (
+    open_image_dialog,
+    load_image,
+    peek_image_mode,
+    get_image_metadata,
+    canvas_to_image_coords,
+    get_pixel_rgb,
+)
 
 # Improve rendering sharpness 
 import ctypes
@@ -44,12 +54,21 @@ FONT_LABEL_HEADER = ("Segoe UI", 8, "bold")
 class PixelViewApp:
     def __init__(self, root):
         self.root = root
+        try:
+            self.root.update_idletasks()
+            self._ui_scale = self.root.winfo_fpixels('1i') / 96.0
+        except Exception:
+            self._ui_scale = 1.0
         self.root.title("PixelView")
-        self.root.geometry("1000x620")
+        self.root.geometry(f"{self._sc(1000)}x{self._sc(620)}")
         self.root.configure(bg=BG_APP)
-        self.root.minsize(860, 540)
+        self.root.minsize(self._sc(860), self._sc(540))
 
         self._dropdown = None  # currently open File dropdown, if any
+
+        # Loaded image state
+        self.image = None      
+        self._tk_image = None  
 
         # Canvas view state (pan/zoom)
         self._img_w, self._img_h = 300, 168
@@ -78,6 +97,10 @@ class PixelViewApp:
         # Hold Space to pan the canvas (app-wide so focus doesn't matter)
         root.bind_all("<KeyPress-space>", self._on_space_down)
         root.bind_all("<KeyRelease-space>", self._on_space_up)
+
+
+    def _sc(self, px):
+        return round(px * self._ui_scale)
 
     # ------------------------------------------------------------------
     # Top title strip: "PixelView UI Design"
@@ -143,10 +166,10 @@ class PixelViewApp:
         dd.overrideredirect(True)
         dd.configure(bg=BG_DROPDOWN, highlightbackground=BORDER,
                      highlightthickness=1)
-        dd.geometry(f"180x172+{x}+{y}")
+        dd.geometry(f"{self._sc(180)}x{self._sc(200)}+{x}+{y}")
         self._dropdown = dd
 
-        def item(text, shortcut="", enabled_look=True, arrow=False):
+        def item(text, shortcut="", enabled_look=True, arrow=False, command=None):
             row = tk.Frame(dd, bg=BG_DROPDOWN)
             row.pack(fill=tk.X, padx=1, pady=1)
             fg = TEXT_PRIMARY if enabled_look else TEXT_DISABLED
@@ -170,18 +193,23 @@ class PixelViewApp:
                 for c in r.winfo_children():
                     c.configure(bg=BG_DROPDOWN)
 
-            # Placeholder only: closes the menu, wires no real action yet
+            def on_click(_e):
+                self._close_dropdown()
+                if command is not None:
+                    command()
+
             row.bind("<Enter>", on_enter)
             row.bind("<Leave>", on_leave)
-            row.bind("<Button-1>", lambda _e: self._close_dropdown())
-            lbl.bind("<Button-1>", lambda _e: self._close_dropdown())
+            row.bind("<Button-1>", on_click)
+            lbl.bind("<Button-1>", on_click)
             return row
 
         def separator():
             sep = tk.Frame(dd, bg=BORDER, height=1)
             sep.pack(fill=tk.X, padx=6, pady=4)
 
-        item("Import Image", "Ctrl+I", enabled_look=True)
+        item("Import Image", "Ctrl+I", enabled_look=True,
+             command=self._on_import_image)
         item("Open Recent", "", enabled_look=True, arrow=True)
         separator()
         item("Save", "Ctrl+S", enabled_look=False)
@@ -194,6 +222,36 @@ class PixelViewApp:
         if self._dropdown is not None:
             self._dropdown.destroy()
             self._dropdown = None
+
+    def _on_import_image(self):
+        path = open_image_dialog()
+        if not path:
+            return
+
+        # Load and validate the image
+        img = load_image(path)
+        if img is None:
+            messagebox.showerror(
+                "Import Failed",
+                f"Couldn't open image:\n{path}"
+            )
+            return
+
+        # Reset view state for the newly loaded image
+        self.image = img
+        self._img_w, self._img_h = img.size
+        self._zoom = 1.0
+        self._offset_x, self._offset_y = 0.0, 0.0
+        self._redraw_canvas_content()
+        self._update_zoom_display()
+
+        # Push file metadata into the Image Properties panel
+        metadata = get_image_metadata(path, img, original_mode=peek_image_mode(path))
+        self.dimensions_value.configure(text=metadata["dimensions"])
+        self.resolution_value.configure(text=metadata["resolution"])
+        self.color_mode_value.configure(text=metadata["color_mode"])
+        self.file_type_value.configure(text=metadata["file_type"])
+        self.file_size_value.configure(text=metadata["file_size"])
 
     def _maybe_close_dropdown(self, event):
         # Close if the click landed outside the File label / dropdown
@@ -213,7 +271,7 @@ class PixelViewApp:
     # Left panel: LAYERS (placeholder rows, disabled)
     # ------------------------------------------------------------------
     def _build_layers_panel(self, parent):
-        panel = tk.Frame(parent, bg=BG_PANEL, width=150,
+        panel = tk.Frame(parent, bg=BG_PANEL, width=self._sc(150),
                           highlightbackground=BORDER, highlightthickness=1)
         panel.pack(side=tk.LEFT, fill=tk.Y)
         panel.pack_propagate(False)
@@ -281,6 +339,10 @@ class PixelViewApp:
         self.canvas.bind("<Button-4>", self._on_canvas_zoom_linux)
         self.canvas.bind("<Button-5>", self._on_canvas_zoom_linux)
 
+        # Hover: show pixel RGB under the cursor
+        self.canvas.bind("<Motion>", self._on_canvas_motion)
+        self.canvas.bind("<Leave>", self._on_canvas_leave)
+
     def _redraw_canvas_content(self, event=None):
         self.canvas.delete("placeholder")
         w = self.canvas.winfo_width()
@@ -292,10 +354,20 @@ class PixelViewApp:
         pw = self._img_w * self._zoom
         ph = self._img_h * self._zoom
         x0, y0 = cx - pw / 2, cy - ph / 2
-        self.canvas.create_rectangle(
-            x0, y0, x0 + pw, y0 + ph,
-            fill="#ffffff", outline="", tags="placeholder"
-        )
+
+        if self.image is not None:
+            # Real image: resize to current zoom and blit onto the canvas
+            disp_w, disp_h = max(1, round(pw)), max(1, round(ph))
+            resized = self.image.resize((disp_w, disp_h))
+            self._tk_image = ImageTk.PhotoImage(resized)
+            self.canvas.create_image(
+                x0, y0, image=self._tk_image, anchor="nw", tags="placeholder"
+            )
+        else:
+            self.canvas.create_rectangle(
+                x0, y0, x0 + pw, y0 + ph,
+                fill="#ffffff", outline="", tags="placeholder"
+            )
 
     # -- Pan (Space + drag) -------------------------------------------
     def _on_space_down(self, event=None):
@@ -365,11 +437,54 @@ class PixelViewApp:
         if hasattr(self, "zoom_scale_value"):
             self.zoom_scale_value.configure(text=f"{self._zoom:.2f}x")
 
+    # -- Hover pixel readout --
+    def _on_canvas_motion(self, event):
+        if self.image is None:
+            self._update_pixel_info(None, None, None)
+            return
+
+        # Convert the mouse position to an image pixel and look up its RGB
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        x, y = canvas_to_image_coords(
+            event.x, event.y, w, h,
+            self._img_w, self._img_h,
+            self._zoom, self._offset_x, self._offset_y,
+        )
+        rgb = get_pixel_rgb(self.image, x, y)
+        if rgb is None:
+            self._update_pixel_info(None, None, None)
+        else:
+            self._update_pixel_info(x, y, rgb)
+
+    def _on_canvas_leave(self, event=None):
+        self._update_pixel_info(None, None, None)
+
+    def _update_pixel_info(self, x, y, rgb):
+        # Cursor position
+        self.cursor_x_value.configure(text=str(x) if x is not None else "\u2014")
+        self.cursor_y_value.configure(text=str(y) if y is not None else "\u2014")
+
+        if rgb is None:
+            # Cursor left the image / canvas: reset to placeholder dashes
+            self.pixel_swatch.itemconfig(self._swatch_rect, fill=BG_PANEL_ROW)
+            for box_label in self.rgb_value_labels:
+                box_label.configure(text="\u2014")
+            return
+
+        # Update the swatch color and the R/G/B value boxes
+        r, g, b = rgb
+        self.pixel_swatch.itemconfig(
+            self._swatch_rect, fill=f"#{r:02x}{g:02x}{b:02x}"
+        )
+        for box_label, value in zip(self.rgb_value_labels, (r, g, b)):
+            box_label.configure(text=str(value))
+
     # ------------------------------------------------------------------
     # Right panel: INFO (cursor pos / pixel color / image props / zoom)
     # ------------------------------------------------------------------
     def _build_info_panel(self, parent):
-        panel = tk.Frame(parent, bg=BG_PANEL, width=170,
+        panel = tk.Frame(parent, bg=BG_PANEL, width=self._sc(170),
                           highlightbackground=BORDER, highlightthickness=1)
         panel.pack(side=tk.RIGHT, fill=tk.Y)
         panel.pack_propagate(False)
@@ -386,39 +501,52 @@ class PixelViewApp:
             row.pack(fill=tk.X, padx=12, pady=1)
             tk.Label(row, text=label, bg=BG_PANEL, fg=TEXT_DISABLED,
                      font=FONT_LABEL).pack(side=tk.LEFT)
-            tk.Label(row, text=value, bg=BG_PANEL, fg=TEXT_DISABLED,
-                     font=FONT_LABEL).pack(side=tk.RIGHT)
+            value_label = tk.Label(row, text=value, bg=BG_PANEL, fg=TEXT_DISABLED,
+                     font=FONT_LABEL)
+            value_label.pack(side=tk.RIGHT)
+            return value_label
 
         section("\u25be CURSOR POSITION")
-        kv_row("X")
-        kv_row("Y")
+        self.cursor_x_value = kv_row("X")
+        self.cursor_y_value = kv_row("Y")
 
         section("\u25be PIXEL COLOR")
         swatch_row = tk.Frame(panel, bg=BG_PANEL)
         swatch_row.pack(fill=tk.X, padx=12, pady=(2, 2))
         sw = tk.Canvas(swatch_row, width=20, height=20, bg=BG_PANEL,
                         highlightbackground=BORDER, highlightthickness=1)
-        sw.create_rectangle(0, 0, 20, 20, fill=BG_PANEL_ROW, outline="")
+        self._swatch_rect = sw.create_rectangle(0, 0, 20, 20, fill=BG_PANEL_ROW, outline="")
         sw.pack(side=tk.LEFT)
+        self.pixel_swatch = sw
         tk.Label(swatch_row, text="hover canvas", bg=BG_PANEL,
                  fg=TEXT_DISABLED, font=FONT_LABEL).pack(side=tk.LEFT, padx=8)
 
         rgb_row = tk.Frame(panel, bg=BG_PANEL)
         rgb_row.pack(fill=tk.X, padx=12, pady=(6, 2))
+        self.rgb_value_labels = []
+        channel_colors = {"R": "#ef4444", "G": "#22c55e", "B": "#3b82f6"}
         for ch in ("R", "G", "B"):
-            box = tk.Frame(rgb_row, bg=BG_PANEL_ROW, width=42, height=28,
+            col = tk.Frame(rgb_row, bg=BG_PANEL)
+            col.pack(side=tk.LEFT, padx=3)
+
+            box = tk.Frame(col, bg=BG_PANEL_ROW, width=self._sc(42), height=self._sc(28),
                             highlightbackground=BORDER, highlightthickness=1)
-            box.pack(side=tk.LEFT, padx=3)
+            box.pack()
             box.pack_propagate(False)
-            tk.Label(box, text="\u2014", bg=BG_PANEL_ROW, fg=TEXT_DISABLED,
-                     font=FONT_LABEL).pack(expand=True)
+            box_label = tk.Label(box, text="\u2014", bg=BG_PANEL_ROW, fg=TEXT_DISABLED,
+                     font=FONT_LABEL)
+            box_label.pack(expand=True)
+            self.rgb_value_labels.append(box_label)
+
+            tk.Label(col, text=ch, bg=BG_PANEL, fg=channel_colors[ch],
+                     font=FONT_LABEL).pack(pady=(1, 0))
 
         section("\u25be IMAGE PROPERTIES")
-        kv_row("Dimensions")
-        kv_row("Resolution")
-        kv_row("Color Mode")
-        kv_row("File Type")
-        kv_row("File Size")
+        self.dimensions_value = kv_row("Dimensions")
+        self.resolution_value = kv_row("Resolution")
+        self.color_mode_value = kv_row("Color Mode")
+        self.file_type_value = kv_row("File Type")
+        self.file_size_value = kv_row("File Size")
 
         section("\u25be ZOOM")
         level_row = tk.Frame(panel, bg=BG_PANEL)
