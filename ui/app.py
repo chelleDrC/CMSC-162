@@ -10,6 +10,13 @@ will be wired up in later project phases.
 
 import tkinter as tk
 
+# Improve rendering sharpness 
+import ctypes
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    pass
+
 # ---------------------------------------------------------------------------
 # Color palette (dark theme, matched to the design mock)
 # ---------------------------------------------------------------------------
