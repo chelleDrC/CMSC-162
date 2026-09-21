@@ -19,6 +19,8 @@ from backend.image import (
     canvas_to_image_coords,
     get_pixel_rgb,
 )
+from backend.channels import split_channels, channel_as_color
+from backend.histogram import compute_histogram, bucketize
 
 # Improve rendering sharpness 
 import ctypes
@@ -67,8 +69,12 @@ class PixelViewApp:
         self._dropdown = None  # currently open File dropdown, if any
 
         # Loaded image state
-        self.image = None      
-        self._tk_image = None  
+        self.image = None
+        self._tk_image = None
+
+        # Channels / histogram state
+        self.channels = None        # {"R": arr, "G": arr, "B": arr} for the loaded image
+        self.channel_mode = "RGB"   # "RGB" | "R" | "G" | "B" -- what the canvas displays
 
         # Canvas view state (pan/zoom)
         self._img_w, self._img_h = 300, 168
@@ -242,8 +248,12 @@ class PixelViewApp:
         self._img_w, self._img_h = img.size
         self._zoom = 1.0
         self._offset_x, self._offset_y = 0.0, 0.0
+        self.channels = split_channels(img)
+        self.channel_mode = "RGB"
+        self._update_channel_buttons()
         self._redraw_canvas_content()
         self._update_zoom_display()
+        self._update_histogram_display()
 
         # Push file metadata into the Image Properties panel
         metadata = get_image_metadata(path, img, original_mode=peek_image_mode(path))
@@ -355,10 +365,11 @@ class PixelViewApp:
         ph = self._img_h * self._zoom
         x0, y0 = cx - pw / 2, cy - ph / 2
 
-        if self.image is not None:
+        display_image = self._get_display_image()
+        if display_image is not None:
             # Real image: resize to current zoom and blit onto the canvas
             disp_w, disp_h = max(1, round(pw)), max(1, round(ph))
-            resized = self.image.resize((disp_w, disp_h))
+            resized = display_image.resize((disp_w, disp_h))
             self._tk_image = ImageTk.PhotoImage(resized)
             self.canvas.create_image(
                 x0, y0, image=self._tk_image, anchor="nw", tags="placeholder"
@@ -368,6 +379,15 @@ class PixelViewApp:
                 x0, y0, x0 + pw, y0 + ph,
                 fill="#ffffff", outline="", tags="placeholder"
             )
+
+    def _get_display_image(self):
+        # RGB mode shows the loaded image as-is; R/G/B modes show that
+        # single channel tinted in its own color (Photoshop-style).
+        if self.image is None:
+            return None
+        if self.channel_mode == "RGB" or self.channels is None:
+            return self.image
+        return channel_as_color(self.channels[self.channel_mode], self.channel_mode)
 
     # -- Pan (Space + drag) -------------------------------------------
     def _on_space_down(self, event=None):
@@ -480,6 +500,51 @@ class PixelViewApp:
         for box_label, value in zip(self.rgb_value_labels, (r, g, b)):
             box_label.configure(text=str(value))
 
+    # -- Channels (Photoshop-style: pick which channel the canvas shows) --
+    def _set_channel_mode(self, mode):
+        if self.image is None:
+            return
+        self.channel_mode = mode
+        self._update_channel_buttons()
+        self._redraw_canvas_content()
+        self._update_histogram_display()
+
+    def _update_channel_buttons(self):
+        if not hasattr(self, "channel_buttons"):
+            return
+        for name, btn in self.channel_buttons.items():
+            active = name == self.channel_mode
+            btn.configure(bg=BG_PANEL_ROW_ACTIVE if active else BG_PANEL_ROW)
+
+    # -- Histogram: drawn on a tkinter Canvas from backend.histogram ------
+    def _update_histogram_display(self):
+        canvas = self.histogram_canvas
+        canvas.delete("hist")
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        if w <= 1 or h <= 1 or self.channels is None:
+            return
+
+        if self.channel_mode == "RGB":
+            series = [(self.channels["R"], "#ef4444"),
+                      (self.channels["G"], "#22c55e"),
+                      (self.channels["B"], "#3b82f6")]
+        else:
+            colors = {"R": "#ef4444", "G": "#22c55e", "B": "#3b82f6"}
+            series = [(self.channels[self.channel_mode], colors[self.channel_mode])]
+
+        bucketed = [(bucketize(compute_histogram(arr), w), color) for arr, color in series]
+        max_count = max((max(buckets) for buckets, _ in bucketed if buckets), default=1) or 1
+        stipple = "gray50" if len(bucketed) > 1 else ""
+
+        for buckets, color in bucketed:
+            for x, count in enumerate(buckets):
+                bar_h = (count / max_count) * (h - 4)
+                if bar_h <= 0:
+                    continue
+                canvas.create_line(x, h - 2, x, h - 2 - bar_h, fill=color,
+                                    stipple=stipple, tags="hist")
+
     # ------------------------------------------------------------------
     # Right panel: INFO (cursor pos / pixel color / image props / zoom)
     # ------------------------------------------------------------------
@@ -540,6 +605,27 @@ class PixelViewApp:
 
             tk.Label(col, text=ch, bg=BG_PANEL, fg=channel_colors[ch],
                      font=FONT_LABEL).pack(pady=(1, 0))
+
+        section("\u25be CHANNELS")
+        channels_row = tk.Frame(panel, bg=BG_PANEL)
+        channels_row.pack(fill=tk.X, padx=12, pady=(0, 6))
+        self.channel_buttons = {}
+        for name, color in (("RGB", TEXT_PRIMARY), ("R", "#ef4444"),
+                             ("G", "#22c55e"), ("B", "#3b82f6")):
+            btn = tk.Label(channels_row, text=name, bg=BG_PANEL_ROW, fg=color,
+                            font=FONT_LABEL, width=4, cursor="hand2", pady=3)
+            btn.pack(side=tk.LEFT, padx=(0, 4))
+            btn.bind("<Button-1>", lambda _e, m=name: self._set_channel_mode(m))
+            self.channel_buttons[name] = btn
+        self._update_channel_buttons()
+
+        section("\u25be HISTOGRAM")
+        self.histogram_canvas = tk.Canvas(
+            panel, height=self._sc(56), bg=BG_PANEL_ROW,
+            highlightbackground=BORDER, highlightthickness=1
+        )
+        self.histogram_canvas.pack(fill=tk.X, padx=12, pady=(0, 10))
+        self.histogram_canvas.bind("<Configure>", lambda _e: self._update_histogram_display())
 
         section("\u25be IMAGE PROPERTIES")
         self.dimensions_value = kv_row("Dimensions")
