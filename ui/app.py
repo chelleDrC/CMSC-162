@@ -3,14 +3,15 @@ PixelView - UI module
 CMSC 162 - Project 1
 
 This module defines the PixelViewApp class: all widget construction, layout,
-and UI-level interaction (dropdown menu, pan/zoom, redraw). Only the File
-menu is interactive so far; everything else is a disabled placeholder that
-will be wired up in later project phases.
+and UI-level interaction (dropdown menus, pan/zoom, redraw, and the View
+menu's Channels/Histogram/Transforms panels, docked at the bottom of the
+window like an editor's integrated terminal -- tabbed, each with its own
+close button, staying open across tab switches).
 """
 
 import tkinter as tk
 from tkinter import messagebox
-from PIL import ImageTk
+from PIL import Image, ImageTk
 from backend.image import (
     open_image_dialog,
     load_image,
@@ -19,8 +20,14 @@ from backend.image import (
     canvas_to_image_coords,
     get_pixel_rgb,
 )
-from backend.channels import split_channels, channel_as_color
+from backend.channels import split_channels, channel_as_color, to_array
 from backend.histogram import compute_histogram, bucketize
+from backend.transforms import (
+    grayscale_transform,
+    negative_transform,
+    threshold_transform,
+    gamma_transform,
+)
 
 # Improve rendering sharpness 
 import ctypes
@@ -66,15 +73,16 @@ class PixelViewApp:
         self.root.configure(bg=BG_APP)
         self.root.minsize(self._sc(860), self._sc(540))
 
-        self._dropdown = None  # currently open File dropdown, if any
+        self._dropdown = None  # currently open File/View dropdown, if any
 
         # Loaded image state
         self.image = None
         self._tk_image = None
 
-        # Channels / histogram state
-        self.channels = None        # {"R": arr, "G": arr, "B": arr} for the loaded image
-        self.channel_mode = "RGB"   # "RGB" | "R" | "G" | "B" -- what the canvas displays
+        # Bottom dock panel state (Channels/Histogram/Transforms tabs)
+        self._dock_tabs = {}     # name -> {"tab", "label", "close", "content"}
+        self._dock_order = []    # tab names, in the order they were opened
+        self._dock_active_tab = None
 
         # Canvas view state (pan/zoom)
         self._img_w, self._img_h = 300, 168
@@ -96,6 +104,7 @@ class PixelViewApp:
         self._build_info_panel(body)
 
         self._build_bottom_toolbar()
+        self._build_dock_panel()
 
         # Close any open dropdown when clicking elsewhere in the app
         root.bind("<Button-1>", self._maybe_close_dropdown, add="+")
@@ -104,9 +113,58 @@ class PixelViewApp:
         root.bind_all("<KeyPress-space>", self._on_space_down)
         root.bind_all("<KeyRelease-space>", self._on_space_up)
 
-
     def _sc(self, px):
         return round(px * self._ui_scale)
+
+    def _build_slider(self, parent, from_, to_, value, command, height=20, pady=(0, 8)):
+        """
+        Canvas-based horizontal slider with a round handle -- tk.Scale's
+        stock rectangular bar doesn't fit the flat dark theme.
+        """
+        canvas = tk.Canvas(parent, height=self._sc(height), bg=BG_APP, highlightthickness=0)
+        canvas.pack(fill=tk.X, pady=pady)
+
+        state = {"value": value}
+        handle_r = self._sc(7)
+        track_h = self._sc(4)
+
+        def value_to_x(v, w):
+            pad = handle_r + 2
+            span = to_ - from_
+            frac = 0 if span == 0 else (v - from_) / span
+            return pad + frac * (w - 2 * pad)
+
+        def x_to_value(x, w):
+            pad = handle_r + 2
+            w_eff = max(1, w - 2 * pad)
+            frac = min(1, max(0, (x - pad) / w_eff))
+            return from_ + frac * (to_ - from_)
+
+        def redraw():
+            canvas.delete("all")
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            if w <= 1:
+                return
+            mid_y = h / 2
+            hx = value_to_x(state["value"], w)
+            # Full track, then the filled portion up to the handle
+            canvas.create_line(handle_r + 2, mid_y, w - handle_r - 2, mid_y,
+                                fill=BG_PANEL_ROW, width=track_h, capstyle=tk.ROUND)
+            canvas.create_line(handle_r + 2, mid_y, hx, mid_y,
+                                fill=ACCENT_BLUE, width=track_h, capstyle=tk.ROUND)
+            canvas.create_oval(hx - handle_r, mid_y - handle_r, hx + handle_r, mid_y + handle_r,
+                                fill=ACCENT_BLUE, outline=BG_APP, width=2)
+
+        def set_from_event(x):
+            state["value"] = x_to_value(x, canvas.winfo_width())
+            redraw()
+            command(state["value"])
+
+        canvas.bind("<Configure>", lambda _e: redraw())
+        canvas.bind("<ButtonPress-1>", lambda e: set_from_event(e.x))
+        canvas.bind("<B1-Motion>", lambda e: set_from_event(e.x))
+        redraw()
 
     # ------------------------------------------------------------------
     # Top title strip: "PixelView UI Design"
@@ -138,41 +196,50 @@ class PixelViewApp:
         tk.Label(left, text="PixelView", bg=BG_MENUBAR, fg=TEXT_PRIMARY,
                  font=FONT_UI_BOLD).pack(side=tk.LEFT, padx=(0, 18))
 
-        # File - the ONLY functional menu (opens dropdown)
+        # File - functional menu (opens dropdown)
         self.file_label = tk.Label(
             left, text="File", bg=BG_MENUBAR, fg=TEXT_PRIMARY,
             font=FONT_UI, cursor="hand2"
         )
         self.file_label.pack(side=tk.LEFT, padx=10)
-        self.file_label.bind("<Button-1>", self._toggle_file_menu)
+        self.file_label.bind("<Button-1>", lambda _e: self._toggle_dropdown(self._open_file_menu))
 
-        # Edit / View / Help - disabled placeholders
-        for name in ("Edit", "View", "Help"):
-            tk.Label(
-                left, text=name, bg=BG_MENUBAR, fg=TEXT_DISABLED,
-                font=FONT_UI
-            ).pack(side=tk.LEFT, padx=10)
+        # Edit - disabled placeholder
+        tk.Label(left, text="Edit", bg=BG_MENUBAR, fg=TEXT_DISABLED,
+                 font=FONT_UI).pack(side=tk.LEFT, padx=10)
+
+        # View - functional menu (opens dropdown): Channels / Histogram / Transforms
+        self.view_label = tk.Label(
+            left, text="View", bg=BG_MENUBAR, fg=TEXT_PRIMARY,
+            font=FONT_UI, cursor="hand2"
+        )
+        self.view_label.pack(side=tk.LEFT, padx=10)
+        self.view_label.bind("<Button-1>", lambda _e: self._toggle_dropdown(self._open_view_menu))
+
+        # Help - disabled placeholder
+        tk.Label(left, text="Help", bg=BG_MENUBAR, fg=TEXT_DISABLED,
+                 font=FONT_UI).pack(side=tk.LEFT, padx=10)
 
         right = tk.Frame(bar, bg=BG_MENUBAR)
         right.pack(side=tk.RIGHT, padx=14, pady=6)
         tk.Label(right, text="Edge: unselected", bg=BG_MENUBAR,
                  fg=TEXT_DISABLED, font=FONT_LABEL).pack(side=tk.RIGHT)
 
-    def _toggle_file_menu(self, event=None):
+    def _toggle_dropdown(self, open_fn):
         if self._dropdown is not None:
             self._close_dropdown()
             return
-        self._open_file_menu()
+        open_fn()
 
-    def _open_file_menu(self):
-        x = self.file_label.winfo_rootx()
-        y = self.file_label.winfo_rooty() + self.file_label.winfo_height()
+    def _open_dropdown(self, anchor, entries, width=180, height=200):
+        x = anchor.winfo_rootx()
+        y = anchor.winfo_rooty() + anchor.winfo_height()
 
         dd = tk.Toplevel(self.root)
         dd.overrideredirect(True)
         dd.configure(bg=BG_DROPDOWN, highlightbackground=BORDER,
                      highlightthickness=1)
-        dd.geometry(f"{self._sc(180)}x{self._sc(200)}+{x}+{y}")
+        dd.geometry(f"{self._sc(width)}x{self._sc(height)}+{x}+{y}")
         self._dropdown = dd
 
         def item(text, shortcut="", enabled_look=True, arrow=False, command=None):
@@ -214,15 +281,34 @@ class PixelViewApp:
             sep = tk.Frame(dd, bg=BORDER, height=1)
             sep.pack(fill=tk.X, padx=6, pady=4)
 
-        item("Import Image", "Ctrl+I", enabled_look=True,
-             command=self._on_import_image)
-        item("Open Recent", "", enabled_look=True, arrow=True)
-        separator()
-        item("Save", "Ctrl+S", enabled_look=False)
-        item("Save As", "", enabled_look=False)
-        item("Export", "Ctrl+E", enabled_look=False)
-        separator()
-        item("Close", "", enabled_look=True)
+        for entry in entries:
+            if entry is None:
+                separator()
+            else:
+                item(**entry)
+
+    def _open_file_menu(self):
+        self._open_dropdown(self.file_label, [
+            dict(text="Import Image", shortcut="Ctrl+I", enabled_look=True,
+                 command=self._on_import_image),
+            dict(text="Open Recent", shortcut="", enabled_look=True, arrow=True),
+            None,
+            dict(text="Save", shortcut="Ctrl+S", enabled_look=False),
+            dict(text="Save As", shortcut="", enabled_look=False),
+            dict(text="Export", shortcut="Ctrl+E", enabled_look=False),
+            None,
+            dict(text="Close", shortcut="", enabled_look=True),
+        ], width=180, height=200)
+
+    def _open_view_menu(self):
+        self._open_dropdown(self.view_label, [
+            dict(text="Channels", shortcut="", enabled_look=True,
+                 command=lambda: self._open_dock_tab("Channels", self._build_channels_tab)),
+            dict(text="Histogram", shortcut="", enabled_look=True,
+                 command=lambda: self._open_dock_tab("Histogram", self._build_histogram_tab)),
+            dict(text="Transforms", shortcut="", enabled_look=True,
+                 command=lambda: self._open_dock_tab("Transforms", self._build_transforms_tab)),
+        ], width=170, height=115)
 
     def _close_dropdown(self):
         if self._dropdown is not None:
@@ -232,7 +318,7 @@ class PixelViewApp:
     def _on_import_image(self):
         path = open_image_dialog()
         if not path:
-            return
+            return  # user cancelled
 
         # Load and validate the image
         img = load_image(path)
@@ -248,12 +334,8 @@ class PixelViewApp:
         self._img_w, self._img_h = img.size
         self._zoom = 1.0
         self._offset_x, self._offset_y = 0.0, 0.0
-        self.channels = split_channels(img)
-        self.channel_mode = "RGB"
-        self._update_channel_buttons()
         self._redraw_canvas_content()
         self._update_zoom_display()
-        self._update_histogram_display()
 
         # Push file metadata into the Image Properties panel
         metadata = get_image_metadata(path, img, original_mode=peek_image_mode(path))
@@ -264,11 +346,11 @@ class PixelViewApp:
         self.file_size_value.configure(text=metadata["file_size"])
 
     def _maybe_close_dropdown(self, event):
-        # Close if the click landed outside the File label / dropdown
+        # Close if the click landed outside the File/View label / dropdown
         if self._dropdown is None:
             return
         widget = event.widget
-        if widget is self.file_label:
+        if widget in (self.file_label, self.view_label):
             return  # handled by the toggle binding
         try:
             if str(widget).startswith(str(self._dropdown)):
@@ -365,11 +447,10 @@ class PixelViewApp:
         ph = self._img_h * self._zoom
         x0, y0 = cx - pw / 2, cy - ph / 2
 
-        display_image = self._get_display_image()
-        if display_image is not None:
+        if self.image is not None:
             # Real image: resize to current zoom and blit onto the canvas
             disp_w, disp_h = max(1, round(pw)), max(1, round(ph))
-            resized = display_image.resize((disp_w, disp_h))
+            resized = self.image.resize((disp_w, disp_h))
             self._tk_image = ImageTk.PhotoImage(resized)
             self.canvas.create_image(
                 x0, y0, image=self._tk_image, anchor="nw", tags="placeholder"
@@ -379,15 +460,6 @@ class PixelViewApp:
                 x0, y0, x0 + pw, y0 + ph,
                 fill="#ffffff", outline="", tags="placeholder"
             )
-
-    def _get_display_image(self):
-        # RGB mode shows the loaded image as-is; R/G/B modes show that
-        # single channel tinted in its own color (Photoshop-style).
-        if self.image is None:
-            return None
-        if self.channel_mode == "RGB" or self.channels is None:
-            return self.image
-        return channel_as_color(self.channels[self.channel_mode], self.channel_mode)
 
     # -- Pan (Space + drag) -------------------------------------------
     def _on_space_down(self, event=None):
@@ -500,50 +572,297 @@ class PixelViewApp:
         for box_label, value in zip(self.rgb_value_labels, (r, g, b)):
             box_label.configure(text=str(value))
 
-    # -- Channels (Photoshop-style: pick which channel the canvas shows) --
-    def _set_channel_mode(self, mode):
+    # ------------------------------------------------------------------
+    # Bottom dock panel: tabbed Channels/Histogram/
+    # Transforms views, pinned above the toolbar. Each tab has its own
+    # close (x) button; the dock hides itself once no tabs remain.
+    # ------------------------------------------------------------------
+    def _build_dock_panel(self):
+        self._dock_frame = tk.Frame(self.root, bg=BG_MENUBAR,
+                                     highlightbackground=BORDER, highlightthickness=1)
+        # Not packed yet -- shown once the first tab opens (see _show_dock).
+
+        self._dock_tabs_bar = tk.Frame(self._dock_frame, bg=BG_MENUBAR)
+        self._dock_tabs_bar.pack(fill=tk.X, side=tk.TOP)
+
+        content_wrapper = tk.Frame(self._dock_frame, bg=BG_APP, height=self._sc(260))
+        content_wrapper.pack(fill=tk.X, side=tk.TOP)
+        content_wrapper.pack_propagate(False)
+
+        self._dock_content = tk.Frame(content_wrapper, bg=BG_APP)
+        self._dock_content.pack(fill=tk.BOTH, expand=True)
+        self._dock_content.grid_rowconfigure(0, weight=1)
+        self._dock_content.grid_columnconfigure(0, weight=1)
+
+    def _show_dock(self):
+        if not self._dock_frame.winfo_ismapped():
+            self._dock_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+    def _hide_dock(self):
+        self._dock_frame.pack_forget()
+
+    def _open_dock_tab(self, name, build_fn):
+        """
+        Open (or refresh, if already open) a dock tab. build_fn(parent)
+        populates the tab's content frame -- called fresh each time, so
+        the tab always reflects the currently loaded image.
+        """
         if self.image is None:
-            return
-        self.channel_mode = mode
-        self._update_channel_buttons()
-        self._redraw_canvas_content()
-        self._update_histogram_display()
-
-    def _update_channel_buttons(self):
-        if not hasattr(self, "channel_buttons"):
-            return
-        for name, btn in self.channel_buttons.items():
-            active = name == self.channel_mode
-            btn.configure(bg=BG_PANEL_ROW_ACTIVE if active else BG_PANEL_ROW)
-
-    # -- Histogram: drawn on a tkinter Canvas from backend.histogram ------
-    def _update_histogram_display(self):
-        canvas = self.histogram_canvas
-        canvas.delete("hist")
-        w = canvas.winfo_width()
-        h = canvas.winfo_height()
-        if w <= 1 or h <= 1 or self.channels is None:
+            messagebox.showinfo("No Image", "Import an image first.")
             return
 
-        if self.channel_mode == "RGB":
-            series = [(self.channels["R"], "#ef4444"),
-                      (self.channels["G"], "#22c55e"),
-                      (self.channels["B"], "#3b82f6")]
+        existing = self._dock_tabs.get(name)
+        if existing is not None:
+            existing["content"].destroy()
         else:
-            colors = {"R": "#ef4444", "G": "#22c55e", "B": "#3b82f6"}
-            series = [(self.channels[self.channel_mode], colors[self.channel_mode])]
+            self._add_dock_tab_button(name)
 
-        bucketed = [(bucketize(compute_histogram(arr), w), color) for arr, color in series]
-        max_count = max((max(buckets) for buckets, _ in bucketed if buckets), default=1) or 1
-        stipple = "gray50" if len(bucketed) > 1 else ""
+        content = tk.Frame(self._dock_content, bg=BG_APP)
+        content.grid(row=0, column=0, sticky="nsew")
+        build_fn(content)
+        self._dock_tabs[name]["content"] = content
 
-        for buckets, color in bucketed:
-            for x, count in enumerate(buckets):
-                bar_h = (count / max_count) * (h - 4)
-                if bar_h <= 0:
-                    continue
-                canvas.create_line(x, h - 2, x, h - 2 - bar_h, fill=color,
-                                    stipple=stipple, tags="hist")
+        self._show_dock()
+        self._activate_dock_tab(name)
+
+    def _add_dock_tab_button(self, name):
+        tab = tk.Frame(self._dock_tabs_bar, bg=BG_PANEL_ROW)
+        tab.pack(side=tk.LEFT, padx=(6, 2), pady=4)
+
+        label = tk.Label(tab, text=name, bg=BG_PANEL_ROW, fg=TEXT_PRIMARY,
+                          font=FONT_LABEL, padx=8, pady=3, cursor="hand2")
+        label.pack(side=tk.LEFT)
+        label.bind("<Button-1>", lambda _e, n=name: self._activate_dock_tab(n))
+
+        close_btn = tk.Label(tab, text="\u2715", bg=BG_PANEL_ROW, fg=TEXT_DISABLED,
+                              font=FONT_LABEL, padx=6, cursor="hand2")
+        close_btn.pack(side=tk.LEFT)
+        close_btn.bind("<Button-1>", lambda _e, n=name: self._close_dock_tab(n))
+
+        self._dock_tabs[name] = {"tab": tab, "label": label, "close": close_btn, "content": None}
+        self._dock_order.append(name)
+
+    def _activate_dock_tab(self, name):
+        info = self._dock_tabs.get(name)
+        if info is None:
+            return
+        self._dock_active_tab = name
+        info["content"].tkraise()
+        for n, tab_info in self._dock_tabs.items():
+            bg = BG_PANEL_ROW_ACTIVE if n == name else BG_PANEL_ROW
+            tab_info["tab"].configure(bg=bg)
+            tab_info["label"].configure(bg=bg)
+            tab_info["close"].configure(bg=bg)
+
+    def _close_dock_tab(self, name):
+        info = self._dock_tabs.pop(name, None)
+        if info is None:
+            return
+        info["tab"].destroy()
+        info["content"].destroy()
+        self._dock_order.remove(name)
+
+        if self._dock_active_tab == name:
+            self._dock_active_tab = None
+            if self._dock_order:
+                self._activate_dock_tab(self._dock_order[-1])
+            else:
+                self._hide_dock()
+
+    # -- Channels tab: R/G/B tinted thumbnails side by side ------------
+    def _build_channels_tab(self, parent):
+        channels = split_channels(self.image)
+        thumb_w = self._sc(180)
+        scale = thumb_w / self.image.width
+        thumb_h = max(1, round(self.image.height * scale))
+
+        row = tk.Frame(parent, bg=BG_APP)
+        row.pack(padx=12, pady=12)
+
+        parent._images = []  # keep PhotoImage references alive
+        for label, key in (("Red", "R"), ("Green", "G"), ("Blue", "B")):
+            col = tk.Frame(row, bg=BG_APP)
+            col.pack(side=tk.LEFT, padx=8)
+
+            tinted = channel_as_color(channels[key], key).resize((thumb_w, thumb_h))
+            tk_img = ImageTk.PhotoImage(tinted)
+            parent._images.append(tk_img)
+
+            tk.Label(col, image=tk_img, bg=BG_APP).pack()
+            tk.Label(col, text=label, bg=BG_APP, fg=TEXT_PRIMARY,
+                     font=FONT_UI).pack(pady=(6, 0))
+
+    # -- Histogram tab: overlaid R/G/B histograms -----------------------
+    def _build_histogram_tab(self, parent):
+        channels = split_channels(self.image)
+        canvas = tk.Canvas(parent, bg=BG_PANEL_ROW, highlightbackground=BORDER,
+                            highlightthickness=1)
+        canvas.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+
+        def draw(_e=None):
+            canvas.delete("hist")
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            if w <= 1 or h <= 1:
+                return
+            series = [(channels["R"], "#ef4444"),
+                      (channels["G"], "#22c55e"),
+                      (channels["B"], "#3b82f6")]
+            bucketed = [(bucketize(compute_histogram(arr), w), color) for arr, color in series]
+            max_count = max((max(b) for b, _ in bucketed if b), default=1) or 1
+            for buckets, color in bucketed:
+                for x, count in enumerate(buckets):
+                    bar_h = (count / max_count) * (h - 4)
+                    if bar_h <= 0:
+                        continue
+                    canvas.create_line(x, h - 2, x, h - 2 - bar_h, fill=color,
+                                        stipple="gray50", tags="hist")
+
+        canvas.bind("<Configure>", draw)
+
+    # -- Transforms tab: Gray/Negative/B-W/Gamma preview + histogram ---
+    def _build_transforms_tab(self, parent):
+        state = {"mode": "Original", "threshold": 128, "gamma": 1.0}
+        gray = grayscale_transform(to_array(self.image))
+        channels = split_channels(self.image)  # for the true R/G/B histogram on Original
+        # Cap by both width AND height so a tall/portrait image can't push
+        # the buttons below outside the dock's fixed height.
+        preview_max_w = self._sc(180)
+        preview_max_h = self._sc(130)
+
+        def get_array():
+            mode = state["mode"]
+            if mode == "Gray":
+                return gray
+            if mode == "Negative":
+                return negative_transform(gray)
+            if mode == "B/W":
+                return threshold_transform(gray, state["threshold"])
+            if mode == "Gamma":
+                return gamma_transform(gray, state["gamma"])
+            return None  # Original
+
+        left = tk.Frame(parent, bg=BG_APP)
+        left.pack(side=tk.LEFT, padx=12, pady=12)
+
+        preview_label = tk.Label(left, bg=BG_APP)
+        preview_label.pack()
+
+        buttons_row = tk.Frame(left, bg=BG_APP)
+        buttons_row.pack(pady=(8, 0))
+        buttons = {}
+        for name in ("Original", "Gray", "Negative", "B/W", "Gamma"):
+            btn = tk.Label(buttons_row, text=name, bg=BG_PANEL_ROW, fg=TEXT_PRIMARY,
+                            font=FONT_LABEL, cursor="hand2", padx=6, pady=4)
+            btn.pack(side=tk.LEFT, padx=2)
+            btn.bind("<Button-1>", lambda _e, m=name: set_mode(m))
+            buttons[name] = btn
+
+        right = tk.Frame(parent, bg=BG_APP)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12), pady=12)
+
+        # Threshold and Gamma each live in their own frame so only the
+        # slider relevant to the active mode is shown -- B/W ignores
+        # Gamma and vice versa, so showing both is misleading.
+        threshold_frame = tk.Frame(right, bg=BG_APP)
+        threshold_row = tk.Frame(threshold_frame, bg=BG_APP)
+        threshold_row.pack(fill=tk.X)
+        tk.Label(threshold_row, text="Threshold", bg=BG_APP, fg=TEXT_DISABLED,
+                 font=FONT_LABEL).pack(side=tk.LEFT)
+        threshold_value_label = tk.Label(threshold_row, text=str(state["threshold"]),
+                                          bg=BG_APP, fg=TEXT_DISABLED, font=FONT_LABEL)
+        threshold_value_label.pack(side=tk.RIGHT)
+        self._build_slider(threshold_frame, 0, 255, state["threshold"], lambda v: on_threshold(v))
+
+        gamma_frame = tk.Frame(right, bg=BG_APP)
+        gamma_row = tk.Frame(gamma_frame, bg=BG_APP)
+        gamma_row.pack(fill=tk.X)
+        tk.Label(gamma_row, text="Gamma", bg=BG_APP, fg=TEXT_DISABLED,
+                 font=FONT_LABEL).pack(side=tk.LEFT)
+        gamma_value_label = tk.Label(gamma_row, text=f"{state['gamma']:.2f}",
+                                      bg=BG_APP, fg=TEXT_DISABLED, font=FONT_LABEL)
+        gamma_value_label.pack(side=tk.RIGHT)
+        self._build_slider(gamma_frame, 0.1, 3.0, state["gamma"], lambda v: on_gamma(v))
+
+        hist_canvas = tk.Canvas(right, bg=BG_PANEL_ROW, highlightbackground=BORDER,
+                                 highlightthickness=1)
+        hist_canvas.pack(fill=tk.BOTH, expand=True)
+
+        def update_slider_visibility():
+            mode = state["mode"]
+            if mode == "B/W":
+                gamma_frame.pack_forget()
+                threshold_frame.pack(fill=tk.X, before=hist_canvas)
+            elif mode == "Gamma":
+                threshold_frame.pack_forget()
+                gamma_frame.pack(fill=tk.X, before=hist_canvas)
+            else:
+                # Original/Gray/Negative are fixed formulas -- neither
+                # slider changes their output, so show neither.
+                threshold_frame.pack_forget()
+                gamma_frame.pack_forget()
+
+        def redraw():
+            arr = get_array()
+            display_img = self.image if arr is None else Image.fromarray(arr, mode="L")
+            scale = min(preview_max_w / display_img.width, preview_max_h / display_img.height)
+            disp_w = max(1, round(display_img.width * scale))
+            disp_h = max(1, round(display_img.height * scale))
+            thumb = display_img.resize((disp_w, disp_h))
+            parent._preview_image = ImageTk.PhotoImage(thumb)  # keep reference alive
+            preview_label.configure(image=parent._preview_image)
+
+            hist_canvas.delete("hist")
+            hw = hist_canvas.winfo_width()
+            hh = hist_canvas.winfo_height()
+            if hw > 1 and hh > 1:
+                if state["mode"] == "Original":
+                    # No single grayscale array represents a color image --
+                    # show the real overlaid R/G/B histogram instead.
+                    series = [(channels["R"], "#ef4444"),
+                              (channels["G"], "#22c55e"),
+                              (channels["B"], "#3b82f6")]
+                    bucketed = [(bucketize(compute_histogram(c), hw - 2), color) for c, color in series]
+                    max_count = max((max(b) for b, _ in bucketed if b), default=1) or 1
+                    for buckets, color in bucketed:
+                        for x, count in enumerate(buckets):
+                            bar_h = (count / max_count) * (hh - 4)
+                            if bar_h <= 0:
+                                continue
+                            hist_canvas.create_line(x + 1, hh - 2, x + 1, hh - 2 - bar_h,
+                                                     fill=color, stipple="gray50", tags="hist")
+                else:
+                    buckets = bucketize(compute_histogram(arr), hw - 2)
+                    max_count = max(buckets) or 1
+                    for x, count in enumerate(buckets):
+                        bar_h = (count / max_count) * (hh - 4)
+                        if bar_h <= 0:
+                            continue
+                        hist_canvas.create_line(x + 1, hh - 2, x + 1, hh - 2 - bar_h,
+                                                 fill=ACCENT_BLUE, tags="hist")
+
+            for name, btn in buttons.items():
+                btn.configure(bg=BG_PANEL_ROW_ACTIVE if name == state["mode"] else BG_PANEL_ROW)
+            update_slider_visibility()
+
+        def set_mode(mode):
+            state["mode"] = mode
+            redraw()
+
+        def on_threshold(value):
+            state["threshold"] = int(float(value))
+            threshold_value_label.configure(text=str(state["threshold"]))
+            if state["mode"] == "B/W":
+                redraw()
+
+        def on_gamma(value):
+            state["gamma"] = float(value)
+            gamma_value_label.configure(text=f"{state['gamma']:.2f}")
+            if state["mode"] == "Gamma":
+                redraw()
+
+        hist_canvas.bind("<Configure>", lambda _e: redraw())
+        redraw()
 
     # ------------------------------------------------------------------
     # Right panel: INFO (cursor pos / pixel color / image props / zoom)
@@ -605,27 +924,6 @@ class PixelViewApp:
 
             tk.Label(col, text=ch, bg=BG_PANEL, fg=channel_colors[ch],
                      font=FONT_LABEL).pack(pady=(1, 0))
-
-        section("\u25be CHANNELS")
-        channels_row = tk.Frame(panel, bg=BG_PANEL)
-        channels_row.pack(fill=tk.X, padx=12, pady=(0, 6))
-        self.channel_buttons = {}
-        for name, color in (("RGB", TEXT_PRIMARY), ("R", "#ef4444"),
-                             ("G", "#22c55e"), ("B", "#3b82f6")):
-            btn = tk.Label(channels_row, text=name, bg=BG_PANEL_ROW, fg=color,
-                            font=FONT_LABEL, width=4, cursor="hand2", pady=3)
-            btn.pack(side=tk.LEFT, padx=(0, 4))
-            btn.bind("<Button-1>", lambda _e, m=name: self._set_channel_mode(m))
-            self.channel_buttons[name] = btn
-        self._update_channel_buttons()
-
-        section("\u25be HISTOGRAM")
-        self.histogram_canvas = tk.Canvas(
-            panel, height=self._sc(56), bg=BG_PANEL_ROW,
-            highlightbackground=BORDER, highlightthickness=1
-        )
-        self.histogram_canvas.pack(fill=tk.X, padx=12, pady=(0, 10))
-        self.histogram_canvas.bind("<Configure>", lambda _e: self._update_histogram_display())
 
         section("\u25be IMAGE PROPERTIES")
         self.dimensions_value = kv_row("Dimensions")
