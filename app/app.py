@@ -3,10 +3,11 @@ PixelView - UI module
 CMSC 162 - Project 1
 
 Defines the PixelViewApp class: all widget construction, layout, and UI-level
-interaction (dropdown menus, pan/zoom, redraw, and the View menu's
-Channels/Histogram/Transforms panels, docked at the bottom of the window like
-an editor's integrated terminal). Each concern lives in its own mixin module
-(menu bar, canvas, panels, dock tabs); this file just wires them together.
+interaction (dropdown menus, pan/zoom, redraw, and the View/Filter menus'
+Channels/Histogram/Transforms/Averaging/Median/Highpass panels, docked at
+the bottom of the window like an editor's integrated terminal). Each concern
+lives in its own mixin module (menu bar, canvas, panels, dock tabs); this
+file just wires them together.
 """
 
 import tkinter as tk
@@ -22,6 +23,10 @@ from .dock.panel import DockPanelMixin
 from .dock.channels_tab import ChannelsTabMixin
 from .dock.histogram_tab import HistogramTabMixin
 from .dock.transforms_tab import TransformsTabMixin
+from .dock.loading import BackgroundFilterMixin
+from .dock.averaging_tab import AveragingTabMixin
+from .dock.median_tab import MedianTabMixin
+from .dock.highpass_tab import HighpassTabMixin
 
 # Improve rendering sharpness
 import ctypes
@@ -42,6 +47,10 @@ class PixelViewApp(
     ChannelsTabMixin,
     HistogramTabMixin,
     TransformsTabMixin,
+    BackgroundFilterMixin,
+    AveragingTabMixin,
+    MedianTabMixin,
+    HighpassTabMixin,
 ):
     def __init__(self, root):
         self.root = root
