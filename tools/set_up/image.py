@@ -1,6 +1,4 @@
-"""
-Lab 1: enable opening of file and display RGB value of a pixel
-"""
+"""Lab 1: enable opening of file and display RGB value of a pixel"""
 
 from tkinter import filedialog
 from PIL import Image
@@ -73,12 +71,12 @@ def _format_file_size(num_bytes):
 def get_image_metadata(path, image, original_mode=None):
     w, h = image.size
     dpi = image.info.get("dpi")
-    resolution = f"{round(dpi[0])} x {round(dpi[1])} DPI" if dpi else "\u2014"
-    ext = os.path.splitext(path)[1].lstrip(".").upper() or "\u2014"
+    resolution = f"{round(dpi[0])} x {round(dpi[1])} DPI" if dpi else "—"
+    ext = os.path.splitext(path)[1].lstrip(".").upper() or "—"
     try:
         size_str = _format_file_size(os.path.getsize(path))
     except OSError:
-        size_str = "\u2014"
+        size_str = "—"
 
     return {
         "dimensions": f"{w} x {h} px",

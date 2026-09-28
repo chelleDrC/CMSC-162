@@ -1,6 +1,6 @@
 import tkinter as tk
 
-from ui.app import PixelViewApp
+from app.app import PixelViewApp
 
 if __name__ == "__main__":
     root = tk.Tk()
