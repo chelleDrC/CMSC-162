@@ -8,7 +8,7 @@ CMSC 162 Project 1 Guide 3, items (d)-(g):
     g. power-law (gamma) transformation
 
 Each transform is a standalone function operating on numpy arrays
-apply_pipeline() chains any sequence of them together and keeps every intermediate result, 
+apply_pipeline() chains any sequence of them together and keeps every intermediate result,
 so the histogram of each transformed stage (item h) can be computed by simply
 calling histogram.compute_histogram() on any of the returned arrays.
 """

@@ -8,7 +8,7 @@ step-by-step in the report.
 
 Integration: Person B imports compute_histogram() directly on their
 point-transformed 2D images (grayscale, negative, thresholded, gamma).
-The UI (ui/app.py) renders the result on a tkinter Canvas via
+The UI (app/app.py) renders the result on a tkinter Canvas via
 bucketize(), so the histogram lives inside PixelView itself rather than
 in a separate plotting window.
 """
