@@ -1,4 +1,4 @@
-"""Title bar, menu bar, File/View dropdown menus, and Import Image."""
+"""Title bar, menu bar, File/View/Filter dropdown menus, and Import Image."""
 
 import tkinter as tk
 from tkinter import messagebox
@@ -66,6 +66,14 @@ class MenuBarMixin:
         )
         self.view_label.pack(side=tk.LEFT, padx=10)
         self.view_label.bind("<Button-1>", lambda _e: self._toggle_dropdown(self._open_view_menu))
+
+        # Filter - functional menu (opens dropdown): spatial-domain filters (Guide 4)
+        self.filter_label = tk.Label(
+            left, text="Filter", bg=BG_MENUBAR, fg=TEXT_PRIMARY,
+            font=FONT_UI, cursor="hand2"
+        )
+        self.filter_label.pack(side=tk.LEFT, padx=10)
+        self.filter_label.bind("<Button-1>", lambda _e: self._toggle_dropdown(self._open_filter_menu))
 
         # Help - disabled placeholder
         tk.Label(left, text="Help", bg=BG_MENUBAR, fg=TEXT_DISABLED,
@@ -165,6 +173,22 @@ class MenuBarMixin:
                  command=lambda: self._open_dock_tab("Transforms", self._build_transforms_tab)),
         ], width=170, height=115)
 
+    def _open_filter_menu(self):
+        self._open_dropdown(self.filter_label, [
+            dict(text="Averaging Filter", shortcut="", enabled_look=True,
+                 command=lambda: self._open_dock_tab("Averaging", self._build_averaging_tab)),
+            dict(text="Median Filter", shortcut="", enabled_look=True,
+                 command=lambda: self._open_dock_tab("Median", self._build_median_tab)),
+            dict(text="Highpass (Laplacian)", shortcut="", enabled_look=True,
+                 command=lambda: self._open_dock_tab("Highpass", self._build_highpass_tab)),
+            None,
+            # Teammate's part (Guide 4 items d/e/f) -- entries reserved
+            # here so the menu already has its final shape, not wired up.
+            dict(text="Unsharp Masking", shortcut="", enabled_look=False),
+            dict(text="Highboost Filter", shortcut="", enabled_look=False),
+            dict(text="Gradient (Sobel/Prewitt)", shortcut="", enabled_look=False),
+        ], width=200, height=230)
+
     def _close_dropdown(self):
         if self._dropdown is not None:
             self._dropdown.destroy()
@@ -206,7 +230,7 @@ class MenuBarMixin:
         if self._dropdown is None:
             return
         widget = event.widget
-        if widget in (self.file_label, self.view_label):
+        if widget in (self.file_label, self.view_label, self.filter_label):
             return  # handled by the toggle binding
         try:
             if str(widget).startswith(str(self._dropdown)):
