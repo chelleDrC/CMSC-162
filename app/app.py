@@ -27,6 +27,9 @@ from .dock.loading import BackgroundFilterMixin
 from .dock.averaging_tab import AveragingTabMixin
 from .dock.median_tab import MedianTabMixin
 from .dock.highpass_tab import HighpassTabMixin
+from .dock.unsharp_tab import UnsharpTabMixin
+from .dock.highboost_tab import HighboostTabMixin
+from .dock.gradient_tab import GradientTabMixin
 
 # Improve rendering sharpness
 import ctypes
@@ -51,6 +54,9 @@ class PixelViewApp(
     AveragingTabMixin,
     MedianTabMixin,
     HighpassTabMixin,
+    UnsharpTabMixin,
+    HighboostTabMixin,
+    GradientTabMixin,
 ):
     def __init__(self, root):
         self.root = root

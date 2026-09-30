@@ -182,11 +182,12 @@ class MenuBarMixin:
             dict(text="Highpass (Laplacian)", shortcut="", enabled_look=True,
                  command=lambda: self._open_dock_tab("Highpass", self._build_highpass_tab)),
             None,
-            # Teammate's part (Guide 4 items d/e/f) -- entries reserved
-            # here so the menu already has its final shape, not wired up.
-            dict(text="Unsharp Masking", shortcut="", enabled_look=False),
-            dict(text="Highboost Filter", shortcut="", enabled_look=False),
-            dict(text="Gradient (Sobel/Prewitt)", shortcut="", enabled_look=False),
+            dict(text="Unsharp Masking", shortcut="", enabled_look=True,
+                 command=lambda: self._open_dock_tab("Unsharp", self._build_unsharp_tab)),
+            dict(text="Highboost Filter", shortcut="", enabled_look=True,
+                 command=lambda: self._open_dock_tab("Highboost", self._build_highboost_tab)),
+            dict(text="Gradient (Sobel)", shortcut="", enabled_look=True,
+                 command=lambda: self._open_dock_tab("Gradient", self._build_gradient_tab)),
         ], width=200, height=230)
 
     def _close_dropdown(self):

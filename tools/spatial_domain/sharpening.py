@@ -1,38 +1,25 @@
 """
 Sharpening / highpass filters.
 
-CMSC 162 Project 1 Guide 4, item (c): highpass filtering with the
-Laplacian operator (kernel shown below).
-
-    d. Unsharp masking     -- teammate's part, not implemented here yet.
-    e. Highboost filtering -- teammate's part, not implemented here yet.
+CMSC 162 Project 1 Guide 4:
+    c. Highpass filtering with the Laplacian operator (kernel shown below)
+    d. Unsharp masking
+    e. Highboost filtering (amplification parameter k)
 
 Where smoothing (smoothing.py) averages neighboring pixels together and
-blurs the image, a highpass filter does the opposite: it responds strongly
-wherever intensity changes *quickly* (edges, fine detail, noise) and
-responds near zero wherever the image is flat. The Laplacian operator is
-the standard way to measure that: it approximates the second derivative of
-the image, using this 3x3 kernel (the "4-neighbor" Laplacian):
+blurs the image, these filters all emphasize the opposite: intensity
+change. The Laplacian responds to change directly (second derivative).
+Unsharp masking and highboost filtering take a different route to the
+same goal -- they use a blur to find out what detail exists, then add
+that detail back on top of the original to make it more pronounced.
 
-        0   1   0
-        1  -4   1
-        0   1   0
-
-Some textbooks use the "8-neighbor" variant instead, which also reacts to
-diagonal edges:
-
-        1   1   1
-        1  -8   1
-        1   1   1
-
-Both kernels sum to zero, so a perfectly flat neighborhood (all pixels
-equal) produces a response of exactly 0 -- only *changes* in intensity
-produce a nonzero response. That response can come out negative (e.g. going
-from bright to dark), so it's converted with abs() before clipping to
-[0, 255] for display; what you're looking at is edge *strength*, not sign.
+All three share the manual sliding-window convolution in _kernel.py
 """
 
 import numpy as np
+
+from ._kernel import convolve2d
+from .smoothing import averaging_filter
 
 L = 256  # intensity levels [0, 255]
 
@@ -53,10 +40,11 @@ def laplacian_highpass(gray_array, kernel_variant="4"):
     """
     Highpass filtering with the Laplacian operator.
 
-    For every pixel, multiplies its 3x3 neighborhood elementwise by the
-    chosen kernel and sums the result (this elementwise-multiply-then-sum
-    is exactly what "convolution with a kernel" means). Borders are padded
-    by repeating the edge pixels so the 3x3 window is always defined.
+    Both kernels sum to zero, so a perfectly flat neighborhood (all
+    pixels equal) produces a response of exactly 0. That response can come out
+    negative (e.g. going from bright to dark), so it's converted with
+    abs() before clipping to [0, 255] for display; what you're looking
+    at is edge *strength*, not sign.
 
     Parameters
     ----------
@@ -76,17 +64,80 @@ def laplacian_highpass(gray_array, kernel_variant="4"):
     if kernel is None:
         raise ValueError('kernel_variant must be "4" or "8"')
 
+    response = convolve2d(gray_array, kernel)
+    return np.clip(np.abs(response), 0, L - 1).astype(np.uint8)
+
+
+def _unsharp_core(gray_array, k, kernel_size=3):
+    """
+    Shared math for unsharp_mask() and highboost_filter() -- they are the
+    same operation, differing only in how large k is allowed to be:
+
+        1. blur the image (the "unsharp" version -- ironic name, but it's
+           the standard term: a blurred copy is used to find detail)
+        2. mask = original - blurred
+           Blurring removes fine detail/edges, so subtracting the blur
+           from the original leaves behind *only* that detail -- this
+           difference is literally called the "unsharp mask".
+        3. sharpened = original + k * mask
+           Adding the mask back on top of the original re-emphasizes
+           exactly the detail that blurring had smoothed away. Flat
+           regions barely change (their mask is close to zero, since
+           blurring a flat region doesn't alter it much); edges and
+           texture are boosted.
+
+    k = 1.0 is standard unsharp masking. k > 1.0 amplifies the mask
+    further -- that's highboost filtering.
+    """
     arr = np.asarray(gray_array, dtype=np.float64)
-    pad = kernel.shape[0] // 2  # 1, for a 3x3 kernel
-    padded = np.pad(arr, pad, mode="edge")
+    blurred = averaging_filter(gray_array, kernel_size=kernel_size).astype(np.float64)
+    mask = arr - blurred
+    sharpened = arr + k * mask
+    return np.clip(sharpened, 0, L - 1).astype(np.uint8)
 
-    h, w = arr.shape
-    out = np.zeros((h, w), dtype=np.float64)
-    for i in range(h):
-        for j in range(w):
-            neighborhood = padded[i:i + kernel.shape[0], j:j + kernel.shape[1]]
-            out[i, j] = np.sum(neighborhood * kernel)
 
-    # The raw response can be negative; what matters for display is how
-    # far it is from zero (i.e. how strong the edge is), not its sign.
-    return np.clip(np.abs(out), 0, L - 1).astype(np.uint8)
+def unsharp_mask(gray_array, kernel_size=3):
+    """
+    Unsharp masking: sharpen by adding back the detail
+    a blur removes, with a fixed amplification of k = 1.0.
+
+    Parameters
+    ----------
+    gray_array : np.ndarray
+        (H, W) uint8 single-channel array.
+    kernel_size : int
+        Size of the internal averaging-filter blur (must be odd,
+        default 3).
+
+    Returns
+    -------
+    np.ndarray
+        (H, W) uint8 array, same shape as input.
+    """
+    return _unsharp_core(gray_array, k=1.0, kernel_size=kernel_size)
+
+
+def highboost_filter(gray_array, k=1.5, kernel_size=3):
+    """
+    Highboost filtering: unsharp masking with an
+    adjustable amplification factor k instead of a fixed k = 1.0.
+
+    Parameters
+    ----------
+    gray_array : np.ndarray
+        (H, W) uint8 single-channel array.
+    k : float
+        Amplification parameter. k = 1.0 reduces to standard unsharp
+        masking; k > 1.0 boosts the extracted detail further for a
+        stronger sharpening effect. Intended to be user-adjustable
+        (e.g. via a UI slider), same as threshold/gamma in Guide 3.
+    kernel_size : int
+        Size of the internal averaging-filter blur (must be odd,
+        default 3).
+
+    Returns
+    -------
+    np.ndarray
+        (H, W) uint8 array, same shape as input.
+    """
+    return _unsharp_core(gray_array, k=k, kernel_size=kernel_size)
