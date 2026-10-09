@@ -13,27 +13,26 @@ Unsharp masking and highboost filtering take a different route to the
 same goal -- they use a blur to find out what detail exists, then add
 that detail back on top of the original to make it more pronounced.
 
-All three share the manual sliding-window convolution in _kernel.py
+All three share the manual sliding-window helpers in _kernel.py, and every
+pixel is processed with plain for loops.
 """
 
 import numpy as np
 
-from ._kernel import convolve2d
+from ._kernel import clamp_to_byte, convolve2d
 from .smoothing import averaging_filter
 
-L = 256  # intensity levels [0, 255]
-
-LAPLACIAN_KERNEL_4 = np.array([
+LAPLACIAN_KERNEL_4 = [
     [0,  1, 0],
     [1, -4, 1],
     [0,  1, 0],
-], dtype=np.float64)
+]
 
-LAPLACIAN_KERNEL_8 = np.array([
+LAPLACIAN_KERNEL_8 = [
     [1,  1, 1],
     [1, -8, 1],
     [1,  1, 1],
-], dtype=np.float64)
+]
 
 
 def laplacian_highpass(gray_array, kernel_variant="4"):
@@ -60,12 +59,27 @@ def laplacian_highpass(gray_array, kernel_variant="4"):
         (H, W) uint8 array -- the edge-response magnitude, same shape as
         input.
     """
-    kernel = {"4": LAPLACIAN_KERNEL_4, "8": LAPLACIAN_KERNEL_8}.get(kernel_variant)
-    if kernel is None:
+    if kernel_variant == "4":
+        kernel = LAPLACIAN_KERNEL_4
+    elif kernel_variant == "8":
+        kernel = LAPLACIAN_KERNEL_8
+    else:
         raise ValueError('kernel_variant must be "4" or "8"')
 
     response = convolve2d(gray_array, kernel)
-    return np.clip(np.abs(response), 0, L - 1).astype(np.uint8)
+
+    height = gray_array.shape[0]
+    width = gray_array.shape[1]
+    out = np.zeros((height, width), dtype=np.uint8)
+
+    for row in range(height):
+        for col in range(width):
+            # abs() turns negative responses positive (-40 -> 40), so
+            # both bright-to-dark and dark-to-bright edges show up white.
+            strength = abs(response[row][col])
+            out[row][col] = clamp_to_byte(strength)
+
+    return out
 
 
 def _unsharp_core(gray_array, k, kernel_size=3):
@@ -89,11 +103,27 @@ def _unsharp_core(gray_array, k, kernel_size=3):
     k = 1.0 is standard unsharp masking. k > 1.0 amplifies the mask
     further -- that's highboost filtering.
     """
-    arr = np.asarray(gray_array, dtype=np.float64)
-    blurred = averaging_filter(gray_array, kernel_size=kernel_size).astype(np.float64)
-    mask = arr - blurred
-    sharpened = arr + k * mask
-    return np.clip(sharpened, 0, L - 1).astype(np.uint8)
+    # Step 1: blurred copy of the whole image.
+    blurred = averaging_filter(gray_array, kernel_size=kernel_size)
+
+    height = gray_array.shape[0]
+    width = gray_array.shape[1]
+    out = np.zeros((height, width), dtype=np.uint8)
+
+    for row in range(height):
+        for col in range(width):
+            original = int(gray_array[row][col])
+            blurred_value = int(blurred[row][col])
+
+            # Step 2: the detail that the blur removed (can be negative).
+            mask = original - blurred_value
+
+            # Step 3: add that detail back, amplified by k.
+            sharpened = original + k * mask
+
+            out[row][col] = clamp_to_byte(sharpened)
+
+    return out
 
 
 def unsharp_mask(gray_array, kernel_size=3):

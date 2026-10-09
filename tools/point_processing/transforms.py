@@ -7,7 +7,19 @@ CMSC 162 Project 1 Guide 3, items (d)-(g):
     f. black/white via manual thresholding
     g. power-law (gamma) transformation
 
-Each transform is a standalone function operating on numpy arrays
+"Point processing" means every output pixel depends ONLY on the input pixel
+at the same position. So every transform below follows the same recipe:
+
+    1. make an empty (all black) output image of the same size
+    2. visit every pixel with two for loops (rows, then columns)
+    3. apply the formula to that one pixel
+    4. store the answer in the output image
+
+The pixel loops are written by hand (no numpy math such as np.where,
+np.clip or np.power) so each step of the formula is easy to follow.
+numpy is only used to create the empty output image, because the UI needs
+a numpy array to turn the result back into a picture (Image.fromarray).
+
 apply_pipeline() chains any sequence of them together and keeps every intermediate result,
 so the histogram of each transformed stage (item h) can be computed by simply
 calling histogram.compute_histogram() on any of the returned arrays.
@@ -16,6 +28,21 @@ calling histogram.compute_histogram() on any of the returned arrays.
 import numpy as np
 
 L = 256  # intensity levels [0, 255]
+
+
+def clamp_to_byte(value):
+    """
+    Keep a pixel value inside the valid range [0, 255] and make it a whole number.
+
+    Formulas can produce values like -12 or 300.7, but a pixel can only
+    store whole numbers from 0 to 255. Anything too small becomes 0,
+    anything too large becomes 255, and decimals are dropped (e.g. 99.8 -> 99).
+    """
+    if value < 0:
+        return 0
+    if value > L - 1:
+        return L - 1
+    return int(value)
 
 
 def grayscale_transform(rgb_array):
@@ -32,11 +59,30 @@ def grayscale_transform(rgb_array):
     np.ndarray
         (H, W) uint8 grayscale array.
     """
-    arr = np.asarray(rgb_array, dtype=np.float64)
-    if arr.ndim != 3 or arr.shape[2] < 3:
+    if len(rgb_array.shape) != 3 or rgb_array.shape[2] < 3:
         raise ValueError("grayscale_transform expects an (H, W, 3+) array")
-    gray = (arr[:, :, 0] + arr[:, :, 1] + arr[:, :, 2]) / 3.0
-    return np.clip(gray, 0, L - 1).astype(np.uint8)
+
+    height = rgb_array.shape[0]
+    width = rgb_array.shape[1]
+
+    # Empty output image: one value per pixel (no color channels).
+    gray = np.zeros((height, width), dtype=np.uint8)
+
+    for row in range(height):
+        for col in range(width):
+            pixel = rgb_array[row][col]
+
+            # int() turns each value into a normal Python number first.
+            # Without it, adding three 0-255 values could "wrap around"
+            # (e.g. 200 + 100 would not give 300).
+            red = int(pixel[0])
+            green = int(pixel[1])
+            blue = int(pixel[2])
+
+            average = (red + green + blue) / 3
+            gray[row][col] = clamp_to_byte(average)
+
+    return gray
 
 
 def negative_transform(gray_array, max_level=L):
@@ -55,9 +101,20 @@ def negative_transform(gray_array, max_level=L):
     np.ndarray
         (H, W) uint8 array, same shape as input.
     """
-    arr = np.asarray(gray_array, dtype=np.int64)
-    negative = (max_level - 1) - arr
-    return np.clip(negative, 0, max_level - 1).astype(np.uint8)
+    height = gray_array.shape[0]
+    width = gray_array.shape[1]
+    negative = np.zeros((height, width), dtype=np.uint8)
+
+    for row in range(height):
+        for col in range(width):
+            r = int(gray_array[row][col])
+
+            # Flip the brightness: black (0) becomes white (255) and
+            # white (255) becomes black (0).
+            s = (max_level - 1) - r
+            negative[row][col] = clamp_to_byte(s)
+
+    return negative
 
 
 def threshold_transform(gray_array, threshold):
@@ -77,8 +134,21 @@ def threshold_transform(gray_array, threshold):
     np.ndarray
         (H, W) uint8 array containing only 0 or 255.
     """
-    arr = np.asarray(gray_array)
-    return np.where(arr >= threshold, 255, 0).astype(np.uint8)
+    height = gray_array.shape[0]
+    width = gray_array.shape[1]
+    black_white = np.zeros((height, width), dtype=np.uint8)
+
+    for row in range(height):
+        for col in range(width):
+            r = int(gray_array[row][col])
+
+            # Bright enough -> white, otherwise -> black.
+            if r >= threshold:
+                black_white[row][col] = 255
+            else:
+                black_white[row][col] = 0
+
+    return black_white
 
 
 def gamma_transform(gray_array, gamma, c=1.0):
@@ -100,9 +170,25 @@ def gamma_transform(gray_array, gamma, c=1.0):
     np.ndarray
         (H, W) uint8 array, same shape as input.
     """
-    arr = np.asarray(gray_array, dtype=np.float64) / (L - 1)
-    corrected = c * np.power(arr, gamma) * (L - 1)
-    return np.clip(corrected, 0, L - 1).astype(np.uint8)
+    height = gray_array.shape[0]
+    width = gray_array.shape[1]
+    corrected = np.zeros((height, width), dtype=np.uint8)
+
+    for row in range(height):
+        for col in range(width):
+            r = int(gray_array[row][col])
+
+            # Step 1: scale the pixel down to the range 0.0 - 1.0
+            normalized = r / (L - 1)
+
+            # Step 2: raise it to the power gamma (** means "to the power of")
+            powered = c * (normalized ** gamma)
+
+            # Step 3: scale it back up to the range 0 - 255
+            s = powered * (L - 1)
+            corrected[row][col] = clamp_to_byte(s)
+
+    return corrected
 
 
 def apply_pipeline(image, steps):

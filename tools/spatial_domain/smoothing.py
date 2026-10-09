@@ -23,42 +23,21 @@ The two filters differ only in *how* they summarize the neighborhood:
       pixel can't drag the median the way it drags the mean.
 
 Implemented as an explicit sliding-window loop (no cv2.blur /
-cv2.medianBlur / scipy.ndimage) so the algorithm can be walked through
-step-by-step in the report, matching histogram.py's approach in Guide 3.
-Because of that, filtering a large image can take a couple of seconds --
-that trade-off is intentional here, not a bug.
+cv2.medianBlur / scipy.ndimage / np.mean / np.median) so the algorithm can
+be walked through step-by-step in the report, matching histogram.py's
+approach in Guide 3. Because of that, filtering a large image can take a
+couple of seconds -- that trade-off is intentional here, not a bug.
 """
 
 import numpy as np
 
-L = 256  # intensity levels [0, 255]
+from ._kernel import clamp_to_byte, get_neighborhood
 
 
-def _slide_window(gray_array, kernel_size, reduce_fn):
-    """
-    Shared sliding-window scaffolding for averaging_filter/median_filter.
-
-    Pads the image by kernel_size // 2 pixels on every side (repeating the
-    edge pixels, so the border doesn't darken toward zero) and then, for
-    every output pixel, cuts out its kernel_size x kernel_size neighborhood
-    and reduces it to a single number with reduce_fn (e.g. np.mean or
-    np.median).
-    """
+def _check_kernel_size(kernel_size):
+    """The window needs a center pixel, so its size must be odd (3, 5, 7, ...)."""
     if kernel_size % 2 == 0 or kernel_size < 1:
         raise ValueError("kernel_size must be a positive odd number (e.g. 3, 5, 7)")
-
-    arr = np.asarray(gray_array, dtype=np.float64)
-    pad = kernel_size // 2
-    padded = np.pad(arr, pad, mode="edge")
-
-    h, w = arr.shape
-    out = np.zeros((h, w), dtype=np.float64)
-    for i in range(h):
-        for j in range(w):
-            neighborhood = padded[i:i + kernel_size, j:j + kernel_size]
-            out[i, j] = reduce_fn(neighborhood)
-
-    return np.clip(out, 0, L - 1).astype(np.uint8)
 
 
 def averaging_filter(gray_array, kernel_size=3):
@@ -78,7 +57,25 @@ def averaging_filter(gray_array, kernel_size=3):
     np.ndarray
         (H, W) uint8 array, same shape as input.
     """
-    return _slide_window(gray_array, kernel_size, np.mean)
+    _check_kernel_size(kernel_size)
+
+    height = gray_array.shape[0]
+    width = gray_array.shape[1]
+    out = np.zeros((height, width), dtype=np.uint8)
+
+    for row in range(height):
+        for col in range(width):
+            values = get_neighborhood(gray_array, row, col, kernel_size)
+
+            # Average = add everything up, then divide by how many there are.
+            total = 0
+            for value in values:
+                total = total + value
+            average = total / len(values)
+
+            out[row][col] = clamp_to_byte(average)
+
+    return out
 
 
 def median_filter(gray_array, kernel_size=3):
@@ -98,4 +95,23 @@ def median_filter(gray_array, kernel_size=3):
     np.ndarray
         (H, W) uint8 array, same shape as input.
     """
-    return _slide_window(gray_array, kernel_size, np.median)
+    _check_kernel_size(kernel_size)
+
+    height = gray_array.shape[0]
+    width = gray_array.shape[1]
+    out = np.zeros((height, width), dtype=np.uint8)
+
+    for row in range(height):
+        for col in range(width):
+            values = get_neighborhood(gray_array, row, col, kernel_size)
+
+            # Median = the middle value once the list is sorted.
+            # The window always holds an odd number of values (9, 25, ...),
+            # so there is always exactly one middle value.
+            values.sort()
+            middle_index = len(values) // 2
+            median = values[middle_index]
+
+            out[row][col] = clamp_to_byte(median)
+
+    return out
