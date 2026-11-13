@@ -23,7 +23,8 @@ from ..theme import BG_APP, TEXT_PRIMARY, FONT_UI
 
 
 class BackgroundFilterMixin:
-    def _run_filter_async(self, parent, compute_fn, on_result, loading_text="Applying filter"):
+    def _run_filter_async(self, parent, compute_fn, on_result, loading_text="Applying filter",
+                          error_title="Filter Failed", on_error=None):
         """
         Parameters
         ----------
@@ -36,6 +37,10 @@ class BackgroundFilterMixin:
         on_result : callable
             Called as on_result(result) on the main thread once
             compute_fn finishes. Skipped if the tab was closed meanwhile.
+        loading_text, error_title : str
+            Overlay text while working / title of the error dialog.
+        on_error : callable, optional
+            Called with no arguments (after the error dialog) if compute_fn raised.
         """
         overlay = tk.Frame(parent, bg=BG_APP)
         overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -78,7 +83,9 @@ class BackgroundFilterMixin:
 
             overlay.destroy()
             if error is not None:
-                messagebox.showerror("Filter Failed", str(error))
+                messagebox.showerror(error_title, str(error))
+                if on_error is not None:
+                    on_error()
                 return
             on_result(result)
 

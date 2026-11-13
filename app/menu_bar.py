@@ -1,14 +1,18 @@
-"""Title bar, menu bar, File/View/Filter dropdown menus, and Import Image."""
+"""Title bar, menu bar, File/View/Filter/Compress dropdown menus, and Import Image."""
 
+import os
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
 from tools.set_up.image import (
     open_image_dialog,
     load_image,
     peek_image_mode,
     get_image_metadata,
+    _format_file_size,
 )
+from tools.compression import pcx as pcx_codec
+from tools.compression import huffman
 from .theme import (
     BG_TITLEBAR, BG_MENUBAR, BG_DROPDOWN, BG_PANEL_ROW_ACTIVE, BORDER,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_DISABLED, ACCENT_BLUE,
@@ -74,6 +78,14 @@ class MenuBarMixin:
         )
         self.filter_label.pack(side=tk.LEFT, padx=10)
         self.filter_label.bind("<Button-1>", lambda _e: self._toggle_dropdown(self._open_filter_menu))
+
+        # Compress - functional menu (opens dropdown): PCX / Huffman (Project 2 Guide 1)
+        self.compress_label = tk.Label(
+            left, text="Compress", bg=BG_MENUBAR, fg=TEXT_PRIMARY,
+            font=FONT_UI, cursor="hand2"
+        )
+        self.compress_label.pack(side=tk.LEFT, padx=10)
+        self.compress_label.bind("<Button-1>", lambda _e: self._toggle_dropdown(self._open_compress_menu))
 
         # Help - disabled placeholder
         tk.Label(left, text="Help", bg=BG_MENUBAR, fg=TEXT_DISABLED,
@@ -160,7 +172,8 @@ class MenuBarMixin:
             dict(text="Save As", shortcut="", enabled_look=False),
             dict(text="Export", shortcut="Ctrl+E", enabled_look=False),
             None,
-            dict(text="Close", shortcut="", enabled_look=True),
+            dict(text="Close", shortcut="", enabled_look=self.image is not None,
+                 command=self._on_close_image),
         ], width=180, height=220)
 
     def _open_view_menu(self):
@@ -190,6 +203,24 @@ class MenuBarMixin:
                  command=lambda: self._open_dock_tab("Gradient", self._build_gradient_tab)),
         ], width=200, height=230)
 
+    def _open_compress_menu(self):
+        self._open_dropdown(self.compress_label, [
+            dict(text="PCX Header & Palette", shortcut="",
+                 enabled_look=self._pcx is not None, command=self._open_pcx_tab),
+            dict(text="Huffman Coding", shortcut="", enabled_look=self.image is not None,
+                 command=lambda: self._open_dock_tab("Huffman", self._build_huffman_tab)),
+            None,
+            dict(text="Open .hfc File\u2026", shortcut="", enabled_look=True,
+                 command=self._on_open_hfc),
+        ], width=200, height=112)
+
+    def _open_pcx_tab(self):
+        if self._pcx is None:
+            messagebox.showinfo("No PCX File",
+                                "Open a .pcx file first (File \u203a Import Image).")
+            return
+        self._open_dock_tab("PCX Info", self._build_pcx_tab)
+
     def _close_dropdown(self):
         if self._dropdown is not None:
             self._dropdown.destroy()
@@ -200,6 +231,10 @@ class MenuBarMixin:
         if not path:
             return  # user cancelled
 
+        if pcx_codec.is_pcx_path(path):
+            self._import_pcx(path)
+            return
+
         # Load and validate the image
         img = load_image(path)
         if img is None:
@@ -209,8 +244,23 @@ class MenuBarMixin:
             )
             return
 
-        # Reset view state for the newly loaded image
+        self._show_loaded_image(img, path)
+
+        # Push file metadata into the Image Properties panel
+        metadata = get_image_metadata(path, img, original_mode=peek_image_mode(path))
+        self._show_metadata(metadata)
+
+    def _show_loaded_image(self, img, path, pcx=None, compress_source=None):
+        """Make img the current image and reset everything tied to the previous one."""
+        # Compression tabs describe a specific file -- drop them for a new one.
+        for name in ("PCX Info", "Huffman"):
+            if name in self._dock_tabs:
+                self._close_dock_tab(name)
+
         self.image = img
+        self._image_path = path
+        self._pcx = pcx
+        self._compress_source = compress_source
         self._canvas_display = None  # drop any transform preview from the previous image
         self._img_w, self._img_h = img.size
         self._zoom = 1.0
@@ -218,20 +268,115 @@ class MenuBarMixin:
         self._redraw_canvas_content()
         self._update_zoom_display()
 
-        # Push file metadata into the Image Properties panel
-        metadata = get_image_metadata(path, img, original_mode=peek_image_mode(path))
+    def _show_metadata(self, metadata):
         self.dimensions_value.configure(text=metadata["dimensions"])
         self.resolution_value.configure(text=metadata["resolution"])
         self.color_mode_value.configure(text=metadata["color_mode"])
         self.file_type_value.configure(text=metadata["file_type"])
         self.file_size_value.configure(text=metadata["file_size"])
 
+    # ------------------------------------------------------------------
+    # PCX (Project 2 Guide 1, items a-c): open via the manual RLE decoder
+    # ------------------------------------------------------------------
+    def _import_pcx(self, path):
+        def done(pcx):
+            if pcx["mode"] == "P":
+                kind = f"{pcx['palette_size']}-color indexed (palette indices)"
+            else:
+                kind = "24-bit RGB (R, G, B bytes)"
+            source = {
+                "mode": pcx["mode"], "width": pcx["width"], "height": pcx["height"],
+                "pixels": pcx["pixels"], "palette": pcx["palette"],
+                "label": f"RLE-reconstructed PCX, {pcx['width']} x {pcx['height']} px, {kind}",
+            }
+            self._show_loaded_image(pcx["image"], path, pcx=pcx, compress_source=source)
+
+            header = pcx["header"]
+            if pcx["mode"] == "RGB":
+                color_mode = "RGB (24-bit)"
+            elif pcx["palette_size"] == 256:
+                color_mode = "P (8-bit)"
+            else:
+                color_mode = f"P ({pcx['palette_size']}-color)"
+            self._show_metadata({
+                "dimensions": f"{pcx['width']} x {pcx['height']} px",
+                "resolution": f"{header['hdpi']} x {header['vdpi']} DPI",
+                "color_mode": color_mode,
+                "file_type": "PCX",
+                "file_size": _format_file_size(pcx["file_size"]),
+            })
+            self._open_dock_tab("PCX Info", self._build_pcx_tab)
+
+        self._run_filter_async(self.canvas.master, lambda: pcx_codec.read_pcx(path), done,
+                               loading_text="Decoding PCX (run-length)",
+                               error_title="Couldn't open PCX file")
+
+    # ------------------------------------------------------------------
+    # .hfc (Project 2 Guide 1, item d): decode a saved Huffman file back
+    # ------------------------------------------------------------------
+    def _on_open_hfc(self):
+        path = filedialog.askopenfilename(
+            title="Open Huffman-compressed image",
+            filetypes=[("Huffman compressed image", "*.hfc"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        def compute():
+            mode, width, height, pixels, palette = huffman.load_hfc(path)
+            img = pcx_codec.build_image(mode, width, height, pixels, palette)
+            return mode, width, height, pixels, palette, img
+
+        def done(payload):
+            mode, width, height, pixels, palette, img = payload
+            kind = "indexed (palette indices)" if mode == "P" else "RGB (R, G, B bytes)"
+            source = {
+                "mode": mode, "width": width, "height": height,
+                "pixels": pixels, "palette": palette,
+                "label": f"Decoded .hfc, {width} x {height} px, {kind}",
+            }
+            self._show_loaded_image(img, path, compress_source=source)
+            self._show_metadata({
+                "dimensions": f"{width} x {height} px",
+                "resolution": "\u2014",
+                "color_mode": "P (8-bit)" if mode == "P" else "RGB (24-bit)",
+                "file_type": "HFC",
+                "file_size": _format_file_size(os.path.getsize(path)),
+            })
+
+        self._run_filter_async(self.canvas.master, compute, done,
+                               loading_text="Decoding Huffman file",
+                               error_title="Couldn't open .hfc file")
+
+    # ------------------------------------------------------------------
+    # File > Close
+    # ------------------------------------------------------------------
+    def _on_close_image(self):
+        if self.image is None:
+            return
+        for name in list(self._dock_order):
+            self._close_dock_tab(name)
+        self.image = None
+        self._image_path = None
+        self._pcx = None
+        self._compress_source = None
+        self._canvas_display = None
+        self._tk_image = None
+        self._img_w, self._img_h = 300, 168
+        self._zoom = 1.0
+        self._offset_x, self._offset_y = 0.0, 0.0
+        self._redraw_canvas_content()
+        self._update_zoom_display()
+        for label in (self.dimensions_value, self.resolution_value, self.color_mode_value,
+                      self.file_type_value, self.file_size_value):
+            label.configure(text="\u2014")
+
     def _maybe_close_dropdown(self, event):
         # Close if the click landed outside the File/View label / dropdown
         if self._dropdown is None:
             return
         widget = event.widget
-        if widget in (self.file_label, self.view_label, self.filter_label):
+        if widget in (self.file_label, self.view_label, self.filter_label, self.compress_label):
             return  # handled by the toggle binding
         try:
             if str(widget).startswith(str(self._dropdown)):
