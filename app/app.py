@@ -30,6 +30,8 @@ from .dock.highpass_tab import HighpassTabMixin
 from .dock.unsharp_tab import UnsharpTabMixin
 from .dock.highboost_tab import HighboostTabMixin
 from .dock.gradient_tab import GradientTabMixin
+from .dock.pcx_tab import PcxTabMixin
+from .dock.huffman_tab import HuffmanTabMixin
 
 # Improve rendering sharpness
 import ctypes
@@ -57,6 +59,8 @@ class PixelViewApp(
     UnsharpTabMixin,
     HighboostTabMixin,
     GradientTabMixin,
+    PcxTabMixin,
+    HuffmanTabMixin,
 ):
     def __init__(self, root):
         self.root = root
@@ -76,6 +80,9 @@ class PixelViewApp(
         self.image = None
         self._tk_image = None
         self._canvas_display = None  # non-None while a Transforms preview overrides self.image
+        self._image_path = None
+        self._pcx = None              # decoded PCX (header/palette/pixels) when a .pcx is open
+        self._compress_source = None  # pixel data the Huffman tab codes (PCX indices, .hfc, ...)
 
         # Bottom dock panel state (Channels/Histogram/Transforms tabs)
         self._dock_tabs = {}     # name -> {"tab", "label", "close", "content"}

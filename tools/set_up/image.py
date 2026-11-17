@@ -6,10 +6,11 @@ import os
 
 
 IMAGE_FILETYPES = [
-    ("Image files", "*.jpg *.jpeg *.png *.tiff *.tif"),
+    ("Image files", "*.jpg *.jpeg *.png *.tiff *.tif *.pcx"),
     ("JPEG", "*.jpg *.jpeg"),
     ("PNG", "*.png"),
     ("TIFF", "*.tiff *.tif"),
+    ("PCX (ZSoft Paintbrush)", "*.pcx"),
     ("All files", "*.*"),
 ]
 
