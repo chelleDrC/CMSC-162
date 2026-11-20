@@ -1,3 +1,10 @@
+> [!WARNING]
+> **DO NOT MERGE THIS BRANCH INTO `main`.**
+> This branch contains **only** the Project 2 Guide 2 files. The PixelView app
+> (Project 1 and Project 2 Guide 1 code) was deleted here on purpose, so merging
+> would delete the team's code from `main`. Use this branch for the Guide 2
+> submission only.
+
 # Noise & Restoration
 
 CMSC 162 - Project 2 Guide 2: Image Degradation and Restoration
