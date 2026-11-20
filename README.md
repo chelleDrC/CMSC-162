@@ -38,3 +38,28 @@ python main.py
   `C = n1/n2`, relative data redundancy `R = 1 - 1/C`, and every pixel value with its
   Huffman code. `Save as .hfc...` writes the compressed file.
 - **Compress > Open .hfc File...**: decodes a saved `.hfc` back onto the canvas.
+
+## Project 2 Guide 2 -- Image Degradation and Restoration
+
+A separate, single-purpose window (it does not change PixelView):
+
+```
+python restoration_app.py
+```
+
+1. **Open Image** -- the image is converted to grayscale and shown in the *Original* card.
+2. **Degrade** (item a) -- choose *Salt & Pepper* (set the salt and pepper probabilities),
+   *Gaussian* (mean, sigma) or *Rayleigh* (a, b), then **Add Noise**. The *Degraded* card
+   shows the noisy image and its histogram (item b.i). Drag on the degraded image to see
+   the histogram of just that patch; click it to go back to the whole image.
+3. **Restore** (item b.ii) -- choose *Geometric* mean, *Contraharmonic* mean (set **Q**:
+   Q > 0 removes pepper, Q < 0 removes salt) or *Median* (order-statistic), pick a kernel
+   size, then **Apply Filter**. **Apply Again** filters the result again (2nd, 3rd pass...).
+
+Code layout:
+
+- `tools/restoration/noise.py` -- the three noise models
+- `tools/restoration/mean_filters.py` -- geometric and contraharmonic mean filters
+- `tools/restoration/order_statistics.py` -- median filter
+- `tools/restoration/_window.py` -- shared helper that collects every pixel's k x k neighborhood
+- `restoration_ui/` -- the window (`window.py`), its widgets (`widgets.py`) and colors (`theme.py`)
