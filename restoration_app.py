@@ -1,7 +1,7 @@
 """
 Entry point for the Noise & Restoration window (CMSC 162 Project 2 Guide 2).
 
-    python restoration_app.py
+    run using: python restoration_app.py
 """
 
 import ctypes

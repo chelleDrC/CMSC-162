@@ -15,7 +15,8 @@ restores it with spatial filters.
 ## Requirements
 
 - Python 3 with `tkinter` (included in standard CPython installs)
-- `pip install -r requirements.txt` (Pillow, numpy)
+- `pip install -r requirements.txt` (Pillow, used only to open the image and show it; the
+  noise and filter code is plain Python with no NumPy)
 
 ## Running
 
@@ -34,6 +35,9 @@ python restoration_app.py
 3. **Restore** (item b.ii) -- choose *Geometric* mean, *Contraharmonic* mean (set **Q**:
    Q > 0 removes pepper, Q < 0 removes salt) or *Median* (order-statistic), pick a kernel
    size, then **Apply Filter**. **Apply Again** filters the result again (2nd, 3rd pass...).
+   The status bar shows "Applying ... (pass N)" while a filter runs. **Undo Pass** goes back
+   one filter pass; **Reset** clears the degraded and restored images (the original stays).
+   **Add Noise** always starts from the original image, so noise does not stack.
 
 ## Code layout
 
@@ -41,5 +45,5 @@ python restoration_app.py
 - `tools/restoration/noise.py` -- the three noise models
 - `tools/restoration/mean_filters.py` -- geometric and contraharmonic mean filters
 - `tools/restoration/order_statistics.py` -- median filter
-- `tools/restoration/_window.py` -- shared helper that collects every pixel's k x k neighborhood
+- `tools/restoration/_window.py` -- shared helpers: clamping and the sliding k x k window
 - `restoration_ui/` -- the window (`window.py`), its widgets (`widgets.py`) and colors (`theme.py`)

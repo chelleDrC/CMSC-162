@@ -1,48 +1,68 @@
 """
-Shared helper: collect every pixel's neighborhood for a k x k filter.
+Shared helpers for the restoration code.
 
-Instead of looping over every pixel and cutting out its k x k window one at
-a time, we build a stack of k*k shifted copies of the image:
+Images are lists of rows: gray[y][x] is an int in [0, 255].
 
-    stack[n, y, x] = the n-th neighbor of pixel (y, x)
+    clamp_to_byte  -- round a number and keep it inside [0, 255]
+    pad_edges      -- copy of the image with the edge pixels repeated outward
+    filter_image   -- slide a k x k window over the image and replace each
+                      pixel with a value computed from the window
 
-e.g. for a 3x3 window, stack[0] holds every pixel's top-left neighbor,
-stack[4] holds the pixel itself, and stack[8] its bottom-right neighbor.
-
-A filter then just reduces along axis 0 -- e.g. np.median(stack, axis=0)
-is a median filter. This is the same sliding-window idea, but numpy does
-the per-pixel loop for us, which makes the filters fast enough to run
-several passes interactively.
 """
 
-import numpy as np
+L = 256  # intensity levels [0, 255]
 
 
-def neighborhood_stack(gray, kernel_size):
+def clamp_to_byte(value):
+    """Round to the nearest integer and clip to [0, 255]."""
+    value = round(value)
+    if value < 0:
+        return 0
+    if value > L - 1:
+        return L - 1
+    return value
+
+
+def pad_edges(gray, pad):
+    """
+    Return a copy of the image with `pad` extra rows and columns on every
+    side. The new border repeats the nearest edge pixel, so windows centered
+    on border pixels still have a full k x k set of neighbors.
+    """
+    h = len(gray)
+    padded = []
+    for y in range(-pad, h + pad):
+        row = gray[min(max(y, 0), h - 1)]  # rows above/below reuse the first/last row
+        padded.append([row[0]] * pad + row + [row[-1]] * pad)
+    return padded
+
+
+def filter_image(gray, kernel_size, window_value):
     """
     Parameters
     ----------
-    gray : np.ndarray
-        (H, W) grayscale image.
-    kernel_size : int
-        Window width/height -- must be odd (3, 5, 7, ...).
+    gray : list of rows (H rows of W ints)
+    kernel_size : odd window width/height (3, 5, 7, ...)
+    window_value : function(list of k*k ints) -> int, the new pixel value
 
     Returns
     -------
-    np.ndarray
-        (kernel_size * kernel_size, H, W) float64 array of neighbor values.
-        Borders are handled by repeating the edge pixels.
+    A new list of rows, the same size as the input.
     """
     if kernel_size < 1 or kernel_size % 2 == 0:
         raise ValueError("kernel_size must be a positive odd number (e.g. 3, 5, 7)")
 
-    image = np.asarray(gray, dtype=np.float64)
-    h, w = image.shape
-    pad = kernel_size // 2
-    padded = np.pad(image, pad, mode="edge")
+    h, w = len(gray), len(gray[0])
+    padded = pad_edges(gray, kernel_size // 2)
 
-    layers = []
-    for dy in range(kernel_size):
-        for dx in range(kernel_size):
-            layers.append(padded[dy:dy + h, dx:dx + w])
-    return np.stack(layers)
+    result = []
+    for y in range(h):
+        rows = padded[y:y + kernel_size]  # the k rows this output row needs
+        out_row = []
+        for x in range(w):
+            window = []
+            for row in rows:
+                window.extend(row[x:x + kernel_size])
+            out_row.append(window_value(window))
+        result.append(out_row)
+    return result

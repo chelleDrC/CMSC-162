@@ -1,27 +1,7 @@
-"""
-RestorationWindow -- the whole Project 2 Guide 2 UI.
-
-    +----------------------------------------------------------------+
-    |  Noise & Restoration                            [Open Image]   |
-    +--------------+-------------------------------------------------+
-    | 1  Degrade   |  Original   |   Degraded       |   Restored     |
-    |   noise type |             |   + histogram    |                |
-    |   parameters |             |   (drag = patch) |                |
-    | 2  Restore   |             |                  |                |
-    |   filter     |             |                  |                |
-    |   kernel, Q  |             |                  |                |
-    +--------------+-------------------------------------------------+
-    |  status message                                                |
-    +----------------------------------------------------------------+
-
-Flow: Open Image -> Add Noise (item a) -> look at the histogram (item b.i)
--> Apply Filter / Apply Again (item b.ii).
-"""
-
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-import numpy as np
 from PIL import Image
 
 from tools.restoration.noise import (
@@ -34,6 +14,8 @@ from .widgets import Button, SegmentedControl, LabeledSlider, ImageCard
 
 NOISE_TYPES = ("Salt & Pepper", "Gaussian", "Rayleigh")
 FILTER_TYPES = ("Geometric", "Contraharmonic", "Median")
+# "Contraharmonic" is too wide for its button, so it is shown on two lines.
+FILTER_LABELS = {"Contraharmonic": "Contra-\nharmonic"}
 
 FILTER_HINTS = {
     "Geometric": "Geometric mean filter: each pixel becomes the geometric mean of its "
@@ -50,21 +32,23 @@ IMAGE_TYPES = [("Images", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.pcx"), ("All 
 class RestorationWindow:
     def __init__(self, root):
         self.root = root
-        self.original = None   # clean grayscale image, (H, W) uint8
+        self.original = None   # clean grayscale image: list of rows, gray[y][x] in 0-255
         self.noisy = None      # degraded image (item a)
         self.restored = None   # filtered image (item b.ii)
         self.passes = 0        # how many times the current filter has been applied
+        self.busy = False      # True while a filter is running in the background
+        self.history = []      # one (image, subtitle) per filter pass, used by Undo Pass
 
         root.title("Noise & Restoration — CMSC 162 Project 2 Guide 2")
-        root.geometry("1360x820")
-        root.minsize(1100, 680)
+        root.geometry("1360x840")
+        root.minsize(1100, 780)
         root.configure(bg=BG)
 
         self._build_header()
         self._build_status_bar()
 
         body = tk.Frame(root, bg=BG)
-        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
         self._build_sidebar(body)
         self._build_cards(body)
 
@@ -77,7 +61,7 @@ class RestorationWindow:
         titles.pack(side=tk.LEFT, padx=20, pady=12)
         tk.Label(titles, text="Noise & Restoration", bg=SURFACE, fg=TEXT,
                  font=FONT_TITLE).pack(anchor="w")
-        tk.Label(titles, text="Image degradation and restoration  •  Project 2 Guide 2",
+        tk.Label(titles, text="Project 2 Guide 2",
                  bg=SURFACE, fg=TEXT_MUTED, font=FONT_SMALL).pack(anchor="w")
 
         Button(header, "Open Image", self.open_image, primary=True).pack(side=tk.RIGHT, padx=20)
@@ -96,11 +80,15 @@ class RestorationWindow:
         sidebar.pack_propagate(False)  # keep the fixed width
 
         inner = tk.Frame(sidebar, bg=SURFACE)
-        inner.pack(fill=tk.BOTH, expand=True, padx=18, pady=16)
+        inner.pack(fill=tk.BOTH, expand=True, padx=18, pady=12)
 
         self._build_degrade_section(inner)
-        tk.Frame(inner, bg=BORDER, height=1).pack(fill=tk.X, pady=18)  # divider
+        tk.Frame(inner, bg=BORDER, height=1).pack(fill=tk.X, pady=12)  # divider
         self._build_restore_section(inner)
+
+    def _caption(self, parent, text, wraplength=330):
+        return tk.Label(parent, text=text, bg=SURFACE, fg=TEXT_MUTED, font=FONT_SMALL,
+                        wraplength=wraplength, justify=tk.LEFT, anchor="w")
 
     def _section_title(self, parent, number, title, subtitle):
         row = tk.Frame(parent, bg=SURFACE)
@@ -146,12 +134,15 @@ class RestorationWindow:
         self._show_noise_settings("Salt & Pepper")
 
         Button(parent, "Add Noise", self.add_noise, primary=True).pack(fill=tk.X, pady=(4, 0))
+        self._caption(parent, "Always starts from the original image, so noise does not stack."
+                      ).pack(fill=tk.X, pady=(2, 0))
 
     def _build_restore_section(self, parent):
         self._section_title(parent, "2", "Restore", "Filter the degraded image")
 
         self.filter_type = SegmentedControl(parent, FILTER_TYPES, "Contraharmonic",
-                                            on_change=self._show_filter_settings)
+                                            on_change=self._show_filter_settings,
+                                            labels=FILTER_LABELS)
         self.filter_type.pack(fill=tk.X)
 
         self.filter_hint = tk.Label(parent, bg=SURFACE, fg=TEXT_MUTED, font=FONT_SMALL,
@@ -171,11 +162,16 @@ class RestorationWindow:
         buttons = tk.Frame(parent, bg=SURFACE)
         buttons.pack(fill=tk.X, pady=(4, 0))
         buttons.grid_columnconfigure((0, 1), weight=1, uniform="buttons")
-        self.filter_buttons = buttons
+        self.filter_buttons = buttons  # the Q slider is packed just above this frame
+
         Button(buttons, "Apply Filter", lambda: self.apply_filter(again=False),
                primary=True).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         Button(buttons, "Apply Again", lambda: self.apply_filter(again=True)
                ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self._caption(buttons, "One pass on the degraded image (does not stack).",
+                      wraplength=150).grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(2, 0))
+        self._caption(buttons, "Another pass on the result (stacks with each click).",
+                      wraplength=150).grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(2, 0))
 
         self._show_filter_settings("Contraharmonic")
 
@@ -191,6 +187,27 @@ class RestorationWindow:
 
         for column, card in enumerate((self.original_card, self.noisy_card, self.restored_card)):
             card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0))
+
+        self._build_restore_actions(self.restored_card.footer)
+
+    def _build_restore_actions(self, footer):
+        """Undo Pass and Reset sit under the Restored image."""
+        footer.grid_columnconfigure((0, 1), weight=1, uniform="restore_actions")
+        guides = []
+        for column, (text, command, guide) in enumerate((
+                ("Undo Pass", self.undo_pass, "Goes back one filter pass"),
+                ("Reset", self.reset, "Clears all noise and filter"))):
+            padx = (0, 4) if column == 0 else (4, 0)
+            Button(footer, text, command).grid(row=0, column=column, sticky="ew",
+                                               padx=padx, pady=(10, 0))
+            label = self._caption(footer, guide, wraplength=100)
+            label.grid(row=1, column=column, sticky="w", padx=padx, pady=(2, 0))
+            guides.append(label)
+
+        def fit_guides(event):  # wrap the guides to the card width as the window resizes
+            for label in guides:
+                label.configure(wraplength=max(event.width // 2 - 8, 60))
+        footer.bind("<Configure>", fit_guides)
 
     # ===================================================== show / hide settings
     def _show_noise_settings(self, noise_type):
@@ -209,18 +226,24 @@ class RestorationWindow:
 
     # ================================================================ actions
     def open_image(self):
+        if self.busy:
+            self.set_status("Wait for the filter to finish first.")
+            return
         path = filedialog.askopenfilename(title="Open Image", filetypes=IMAGE_TYPES)
         if not path:
             return
         try:
             with Image.open(path) as img:
-                gray = np.array(img.convert("L"), dtype=np.uint8)
+                gray_img = img.convert("L")
+                w, h = gray_img.size
+                pixels = list(gray_img.tobytes()) 
         except Exception as error:
             messagebox.showerror("Couldn't open image", str(error))
             return
 
+        gray = [pixels[y * w:(y + 1) * w] for y in range(h)]  # cut into rows: gray[y][x]
         self.original, self.noisy, self.restored, self.passes = gray, None, None, 0
-        h, w = gray.shape
+        self.history = []
         self.original_card.set_image(gray, f"{w} × {h} px, grayscale")
         self.noisy_card.set_image(None)
         self.restored_card.set_image(None)
@@ -230,6 +253,9 @@ class RestorationWindow:
         """Item a: degrade the original image with the selected noise."""
         if self.original is None:
             self.set_status("Open an image first.")
+            return
+        if self.busy:
+            self.set_status("Wait for the filter to finish first.")
             return
 
         noise_type = self.noise_type.value
@@ -246,7 +272,7 @@ class RestorationWindow:
             self.noisy = add_rayleigh_noise(self.original, a, b)
             description = f"Rayleigh  •  a = {a:.0f}, b = {b:.0f}"
 
-        self.restored, self.passes = None, 0
+        self.restored, self.passes, self.history = None, 0, []
         self.noisy_card.set_image(self.noisy, description)
         self.restored_card.set_image(None)
         self.set_status(f"Added {description}. Next: pick a filter and click Apply Filter.")
@@ -256,37 +282,105 @@ class RestorationWindow:
         Item b.ii: restore the degraded image.
         Apply Filter -> filters the degraded image (pass 1).
         Apply Again  -> filters the last result again (pass 2, 3, ...).
+
+        The filter runs in a background thread so the window stays responsive;
+        _finish_filter picks up the result when the thread is done.
         """
+        if self.busy:
+            self.set_status("A filter is still running.")
+            return
         if self.noisy is None:
             self.set_status("Add noise first (step 1).")
             return
 
         if again and self.restored is not None:
-            source, self.passes = self.restored, self.passes + 1
+            source, passes = self.restored, self.passes + 1
         else:
-            source, self.passes = self.noisy, 1
+            source, passes = self.noisy, 1
 
         filter_type = self.filter_type.value
         size = int(self.kernel_size.get())
         q = round(self.q_value.get(), 1)
 
-        self.root.configure(cursor="watch")
-        self.root.update_idletasks()
-        try:
-            if filter_type == "Geometric":
-                self.restored = geometric_mean_filter(source, size)
-                description = f"Geometric mean {size}×{size}"
-            elif filter_type == "Contraharmonic":
-                self.restored = contraharmonic_mean_filter(source, size, q)
-                description = f"Contraharmonic {size}×{size}, Q = {q:+.1f}"
-            else:
-                self.restored = median_filter(source, size)
-                description = f"Median {size}×{size}"
-        finally:
-            self.root.configure(cursor="")
+        if filter_type == "Geometric":
+            run = lambda: geometric_mean_filter(source, size)
+            description = f"Geometric mean {size}×{size}"
+        elif filter_type == "Contraharmonic":
+            run = lambda: contraharmonic_mean_filter(source, size, q)
+            description = f"Contraharmonic {size}×{size}, Q = {q:+.1f}"
+        else:
+            run = lambda: median_filter(source, size)
+            description = f"Median {size}×{size}"
 
-        self.restored_card.set_image(self.restored, f"{description}  •  pass {self.passes}")
-        self.set_status(f"Applied {description} (pass {self.passes}).")
+        outcome = {}  # the worker thread leaves its result (or error) here
+
+        def work():
+            try:
+                outcome["image"] = run()
+            except Exception as error:
+                outcome["error"] = error
+
+        self.busy = True
+        self.root.configure(cursor="watch")
+        self.set_status(f"Applying {description} (pass {passes})…")
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        self._finish_filter(worker, outcome, description, passes)
+
+    def _finish_filter(self, worker, outcome, description, passes):
+        """Check every 100 ms whether the filter thread is done, then show the result."""
+        if worker.is_alive():
+            self.root.after(100, self._finish_filter, worker, outcome, description, passes)
+            return
+
+        self.busy = False
+        self.root.configure(cursor="")
+        if "error" in outcome:
+            messagebox.showerror("Filter failed", str(outcome["error"]))
+            self.set_status("The filter failed.")
+            return
+
+        subtitle = f"{description}  •  pass {passes}"
+        if passes == 1:
+            self.history = []  # a fresh Apply Filter starts a new chain of passes
+        self.history.append((outcome["image"], subtitle))
+        self.restored, self.passes = outcome["image"], passes
+        self.restored_card.set_image(self.restored, subtitle)
+        self.set_status(f"Applied {description} (pass {passes}).")
+
+    def undo_pass(self):
+        """Go back one filter pass: pass 3 -> pass 2 -> pass 1 -> degraded image only."""
+        if self.busy:
+            self.set_status("Wait for the filter to finish first.")
+            return
+        if not self.history:
+            self.set_status("Nothing to undo.")
+            return
+
+        self.history.pop()
+        self.passes = len(self.history)
+        if self.history:
+            self.restored, subtitle = self.history[-1]
+            self.restored_card.set_image(self.restored, subtitle)
+            self.set_status(f"Undid one pass. Showing pass {self.passes}.")
+        else:
+            self.restored = None
+            self.restored_card.set_image(None)
+            self.set_status("Undid the last pass. Back to the degraded image.")
+
+    def reset(self):
+        """Clear the degraded and restored images."""
+        if self.busy:
+            self.set_status("Wait for the filter to finish first.")
+            return
+        if self.original is None:
+            self.set_status("Open an image first.")
+            return
+
+        self.noisy, self.restored, self.passes, self.history = None, None, 0, []
+        self.noisy_card.set_image(None)
+        self.restored_card.set_image(None)
+        self.set_status("Reset. The original is still loaded: choose a noise type and click Add Noise.")
 
     def set_status(self, message):
         self.status.configure(text=message)
